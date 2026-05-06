@@ -133,7 +133,8 @@ def process_file(input_path, args, encoder):
     print(f"\n[Processing Config]")
     print(f"  output:     {output_path}")
     print(f"  frames:     {start} -> {end}  ({n_frames} frames)")
-    print(f"  fps:        {args.fps if args.fps else f'{info[\"fps\"]:.2f} (original)'}  bitrate: {args.bitrate} kbps")
+    fps_str = str(args.fps) if args.fps else f"{info['fps']:.2f} (original)"
+    print(f"  fps:        {fps_str}  bitrate: {args.bitrate} kbps")
     print(f"  resolution: {out_res.replace(':', 'x')}  codec: {args.codec} ({encoder})  preset: {args.preset}")
     print()
 
