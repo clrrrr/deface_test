@@ -2,14 +2,13 @@
 import argparse
 import subprocess
 import os
-import json
 import glob
 import time
+import cv2
 from tqdm import tqdm
 import imageio_ffmpeg
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
-FFPROBE = FFMPEG.replace('ffmpeg', 'ffprobe')
 
 RESOLUTIONS = {
     '480p':  '854:480',
@@ -33,25 +32,21 @@ ENCODERS = {
 }
 
 
-def ffprobe_info(path):
-    cmd = [FFPROBE, '-v', 'quiet', '-print_format', 'json',
-           '-show_streams', '-show_format', path]
-    data = json.loads(subprocess.check_output(cmd))
-    video = next(s for s in data['streams'] if s['codec_type'] == 'video')
-    fmt = data['format']
-    num, den = video.get('r_frame_rate', '30/1').split('/')
-    fps = float(num) / float(den)
-    nframes = int(video.get('nb_frames') or 0) or int(float(fmt.get('duration', 0)) * fps)
-    return {
-        'fps': fps,
-        'nframes': nframes,
-        'width': video['width'],
-        'height': video['height'],
-        'size': int(fmt['size']),
-        'bitrate': int(fmt.get('bit_rate', 0)) // 1000,
-        'codec': video['codec_name'],
-        'format': fmt['format_name'].split(',')[0],
-    }
+def get_video_info(path):
+    cap = cv2.VideoCapture(path)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+    codec = ''.join(chr((fourcc >> 8 * i) & 0xFF) for i in range(4)).strip()
+    cap.release()
+    size = os.path.getsize(path)
+    duration = total / fps if fps > 0 else 0
+    bitrate = int(size * 8 / duration / 1000) if duration > 0 else 0
+    fmt = os.path.splitext(path)[1].lstrip('.')
+    return {'fps': fps, 'nframes': total, 'width': w, 'height': h,
+            'size': size, 'bitrate': bitrate, 'codec': codec, 'format': fmt}
 
 
 def detect_gpu():
@@ -107,7 +102,7 @@ def run_with_progress(cmd, n_frames, label):
 
 
 def process_file(input_path, args, encoder):
-    info = ffprobe_info(input_path)
+    info = get_video_info(input_path)
     start = args.start_frame
     end = info['nframes'] if args.end_frame < 0 else min(args.end_frame, info['nframes'])
     n_frames = end - start
