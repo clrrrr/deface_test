@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Output videos
+*_compress.*
+*_anonymized.*
+
+# Input data
+inputs/
+
+# macOS
+.DS_Store
