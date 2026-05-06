@@ -73,14 +73,14 @@ def build_cmd(input_path, output_path, args, encoder, info):
         cmd += ['-frames:v', str(args.end_frame - args.start_frame)]
 
     filters = []
+    if args.fps is not None:
+        filters.append(f"fps={args.fps}")
     if args.resolution != 'original':
         filters.append(f"scale={RESOLUTIONS[args.resolution]}")
     if filters:
         cmd += ['-vf', ','.join(filters)]
 
     cmd += ['-c:v', encoder, '-b:v', f'{args.bitrate}k', '-threads', '0']
-    if args.fps is not None:
-        cmd += ['-r', str(args.fps)]
     if encoder in ('libx265', 'libx264', 'libvpx-vp9'):
         cmd += ['-preset', args.preset]
     cmd += ['-progress', 'pipe:1', '-nostats']
