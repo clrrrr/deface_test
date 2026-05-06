@@ -1,120 +1,198 @@
 #!/usr/bin/env python3
 import argparse
-import time
+import subprocess
 import os
-import cv2
-import imageio
+import json
+import glob
+import time
 from tqdm import tqdm
+import imageio_ffmpeg
+
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+FFPROBE = FFMPEG.replace('ffmpeg', 'ffprobe')
 
 RESOLUTIONS = {
-    '480p': (854, 480),
-    '720p': (1280, 720),
-    '1080p': (1920, 1080),
-    '4k': (3840, 2160),
+    '480p':  '854:480',
+    '720p':  '1280:720',
+    '1080p': '1920:1080',
+    '4k':    '3840:2160',
 }
-CODECS = {
-    'hevc': 'libx265',
-    'h264': 'libx264',
-    'vp9': 'libvpx-vp9',
-    'av1': 'libaom-av1',
+
+# (codec, gpu) -> ffmpeg encoder
+ENCODERS = {
+    ('hevc', 'nvidia'): 'hevc_nvenc',
+    ('hevc', 'amd'):    'hevc_amf',
+    ('hevc', 'intel'):  'hevc_qsv',
+    ('hevc', 'cpu'):    'libx265',
+    ('h264', 'nvidia'): 'h264_nvenc',
+    ('h264', 'amd'):    'h264_amf',
+    ('h264', 'intel'):  'h264_qsv',
+    ('h264', 'cpu'):    'libx264',
+    ('vp9',  'cpu'):    'libvpx-vp9',
+    ('av1',  'cpu'):    'libaom-av1',
 }
+
+
+def ffprobe_info(path):
+    cmd = [FFPROBE, '-v', 'quiet', '-print_format', 'json',
+           '-show_streams', '-show_format', path]
+    data = json.loads(subprocess.check_output(cmd))
+    video = next(s for s in data['streams'] if s['codec_type'] == 'video')
+    fmt = data['format']
+    num, den = video.get('r_frame_rate', '30/1').split('/')
+    fps = float(num) / float(den)
+    nframes = int(video.get('nb_frames') or 0) or int(float(fmt.get('duration', 0)) * fps)
+    return {
+        'fps': fps,
+        'nframes': nframes,
+        'width': video['width'],
+        'height': video['height'],
+        'size': int(fmt['size']),
+        'bitrate': int(fmt.get('bit_rate', 0)) // 1000,
+        'codec': video['codec_name'],
+        'format': fmt['format_name'].split(',')[0],
+    }
+
+
+def detect_gpu():
+    for gpu, enc in [('nvidia', 'hevc_nvenc'), ('amd', 'hevc_amf'), ('intel', 'hevc_qsv')]:
+        r = subprocess.run(
+            [FFMPEG, '-f', 'lavfi', '-i', 'nullsrc=s=64x64', '-t', '0.1',
+             '-c:v', enc, '-f', 'null', '-'],
+            capture_output=True
+        )
+        if r.returncode == 0:
+            return gpu
+    return 'cpu'
+
+
+def build_cmd(input_path, output_path, args, encoder, info):
+    cmd = [FFMPEG, '-y', '-hide_banner']
+
+    if args.start_frame > 0:
+        cmd += ['-ss', str(args.start_frame / info['fps'])]
+
+    cmd += ['-i', input_path]
+
+    if args.end_frame >= 0:
+        cmd += ['-frames:v', str(args.end_frame - args.start_frame)]
+
+    filters = []
+    if args.resolution != 'original':
+        filters.append(f"scale={RESOLUTIONS[args.resolution]}")
+    if filters:
+        cmd += ['-vf', ','.join(filters)]
+
+    cmd += ['-c:v', encoder, '-b:v', f'{args.bitrate}k', '-r', str(args.fps)]
+    cmd += ['-progress', 'pipe:1', '-nostats']
+    cmd += [output_path]
+    return cmd
+
+
+def run_with_progress(cmd, n_frames, label):
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    with tqdm(total=n_frames, unit='frame', ncols=90, desc=label) as pbar:
+        current = 0
+        for line in proc.stdout:
+            if line.startswith('frame='):
+                try:
+                    f = int(line.split('=')[1].strip())
+                    pbar.update(f - current)
+                    current = f
+                except ValueError:
+                    pass
+        pbar.update(n_frames - current)
+    proc.wait()
+    return proc.returncode
+
+
+def process_file(input_path, args, encoder):
+    info = ffprobe_info(input_path)
+    start = args.start_frame
+    end = info['nframes'] if args.end_frame < 0 else min(args.end_frame, info['nframes'])
+    n_frames = end - start
+
+    dirname = os.path.dirname(os.path.abspath(input_path))
+    basename = os.path.splitext(os.path.basename(input_path))[0]
+    if args.output and not os.path.isdir(args.output):
+        output_path = args.output
+    else:
+        out_dir = args.output if (args.output and os.path.isdir(args.output)) else dirname
+        suffix = f"_{start}_{end}_compress" if (start != 0 or args.end_frame >= 0) else "_full_compress"
+        output_path = os.path.join(out_dir, f"{basename}{suffix}.{args.fmt}")
+
+    print(f"\n[Input Video Info]  {input_path}")
+    print(f"  size:       {info['size'] / 1024 / 1024:.2f} MB")
+    print(f"  nframes:    {info['nframes']}")
+    print(f"  bitrate:    {info['bitrate']} kbps")
+    print(f"  fps:        {info['fps']:.2f}")
+    print(f"  resolution: {info['width']}x{info['height']}")
+    print(f"  codec:      {info['codec']}")
+    print(f"  format:     {info['format']}")
+
+    out_res = RESOLUTIONS.get(args.resolution, f"{info['width']}:{info['height']}")
+    print(f"\n[Processing Config]")
+    print(f"  output:     {output_path}")
+    print(f"  frames:     {start} -> {end}  ({n_frames} frames)")
+    print(f"  fps:        {args.fps}  bitrate: {args.bitrate} kbps")
+    print(f"  resolution: {out_res.replace(':', 'x')}  codec: {args.codec} ({encoder})")
+    print()
+
+    cmd = build_cmd(input_path, output_path, args, encoder, info)
+    rc = run_with_progress(cmd, n_frames, os.path.basename(input_path))
+
+    if rc == 0:
+        out_size = os.path.getsize(output_path) / 1024 / 1024
+        print(f"Done -> {output_path}  ({out_size:.2f} MB)")
+    else:
+        print(f"Error: ffmpeg exited with code {rc}")
+    return rc
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Video transcoder')
-    parser.add_argument('input', help='Input video path')
-    parser.add_argument('-o', '--output', help='Output video path')
+    parser = argparse.ArgumentParser(description='Fast video transcoder (GPU-accelerated)')
+    parser.add_argument('input', nargs='+', help='Input file(s) or directory')
+    parser.add_argument('-o', '--output', help='Output path (file or directory for batch)')
     parser.add_argument('--start-frame', type=int, default=0)
     parser.add_argument('--end-frame', type=int, default=-1)
     parser.add_argument('--fps', type=float, default=30.0)
     parser.add_argument('--bitrate', type=int, default=1000, help='kbps')
     parser.add_argument('--resolution', default='720p',
                         choices=list(RESOLUTIONS.keys()) + ['original'])
-    parser.add_argument('--codec', default='hevc', choices=list(CODECS.keys()))
+    parser.add_argument('--codec', default='hevc', choices=['hevc', 'h264', 'vp9', 'av1'])
+    parser.add_argument('--gpu', default='auto',
+                        choices=['auto', 'nvidia', 'amd', 'intel', 'cpu'])
     parser.add_argument('--format', default='mp4', dest='fmt')
     args = parser.parse_args()
 
-    cap = cv2.VideoCapture(args.input)
-    if not cap.isOpened():
-        print(f"Error: cannot open '{args.input}'")
+    # Resolve GPU
+    gpu = detect_gpu() if args.gpu == 'auto' else args.gpu
+    encoder = ENCODERS.get((args.codec, gpu)) or ENCODERS.get((args.codec, 'cpu'))
+    print(f"GPU: {gpu}  Encoder: {encoder}")
+
+    # Collect input files
+    files = []
+    for pattern in args.input:
+        if os.path.isdir(pattern):
+            for ext in ('mp4', 'MP4', 'mov', 'MOV', 'avi', 'AVI', 'mkv'):
+                files += glob.glob(os.path.join(pattern, f'*.{ext}'))
+        else:
+            files += glob.glob(pattern) or ([pattern] if os.path.isfile(pattern) else [])
+
+    if not files:
+        print("No input files found.")
         return 1
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    src_fps = cap.get(cv2.CAP_PROP_FPS)
-    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    file_size = os.path.getsize(args.input)
-    duration = total_frames / src_fps if src_fps > 0 else 0
-    src_bitrate = file_size * 8 / duration / 1000 if duration > 0 else 0
-    fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-    src_codec = ''.join(chr((fourcc >> 8 * i) & 0xFF) for i in range(4)).strip()
-    src_fmt = os.path.splitext(args.input)[1].lstrip('.')
-
-    start = args.start_frame
-    end = total_frames if args.end_frame < 0 else min(args.end_frame, total_frames)
-    n_frames = end - start
-
-    if args.resolution == 'original':
-        out_w, out_h = src_w, src_h
-    else:
-        out_w, out_h = RESOLUTIONS[args.resolution]
-
-    if args.output is None:
-        dirname = os.path.dirname(os.path.abspath(args.input))
-        basename = os.path.splitext(os.path.basename(args.input))[0]
-        if args.start_frame != 0 or args.end_frame >= 0:
-            suffix = f"_{args.start_frame}_{end}_compress"
-        else:
-            suffix = "_full_compress"
-        args.output = os.path.join(dirname, f"{basename}{suffix}.{args.fmt}")
-
-    # Print source info (from metadata, no frame reading needed)
-    print("\n[Input Video Info]")
-    print(f"  size:       {file_size / 1024 / 1024:.2f} MB")
-    print(f"  nframes:    {total_frames}")
-    print(f"  bitrate:    {src_bitrate:.0f} kbps")
-    print(f"  fps:        {src_fps:.2f}")
-    print(f"  resolution: {src_w}x{src_h}")
-    print(f"  codec:      {src_codec}")
-    print(f"  format:     {src_fmt}")
-
-    print("\n[Processing Config]")
-    print(f"  input:      {args.input}")
-    print(f"  output:     {args.output}")
-    print(f"  frames:     {start} -> {end}  ({n_frames} frames)")
-    print(f"  fps:        {args.fps}")
-    print(f"  bitrate:    {args.bitrate} kbps")
-    print(f"  resolution: {out_w}x{out_h}")
-    print(f"  codec:      {args.codec} ({CODECS[args.codec]})")
-    print(f"  format:     {args.fmt}")
-    print()
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-    writer = imageio.get_writer(
-        args.output,
-        fps=args.fps,
-        codec=CODECS[args.codec],
-        bitrate=f'{args.bitrate}k',
-        output_params=['-vf', f'scale={out_w}:{out_h}'],
-    )
-
     t0 = time.time()
-    with tqdm(total=n_frames, unit='frame', ncols=90) as pbar:
-        for i in range(n_frames):
-            ret, frame = cap.read()
-            if not ret:
-                break
-            writer.append_data(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            elapsed = time.time() - t0
-            eta = elapsed / (i + 1) * (n_frames - i - 1) if i > 0 else 0
-            pbar.set_postfix(ETA=f'{eta:.0f}s')
-            pbar.update(1)
+    errors = 0
+    for i, f in enumerate(files):
+        print(f"\n[{i+1}/{len(files)}] {f}")
+        rc = process_file(f, args, encoder)
+        if rc != 0:
+            errors += 1
 
-    writer.close()
-    cap.release()
-
-    out_size = os.path.getsize(args.output) / 1024 / 1024
-    print(f"\nDone. Output: {args.output}  ({out_size:.2f} MB)")
+    elapsed = time.time() - t0
+    print(f"\nFinished {len(files)} file(s) in {elapsed:.1f}s  ({errors} error(s))")
 
 
 if __name__ == '__main__':
