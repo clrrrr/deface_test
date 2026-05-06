@@ -62,7 +62,7 @@ def detect_gpu():
 
 
 def build_cmd(input_path, output_path, args, encoder, info):
-    cmd = [FFMPEG, '-y', '-hide_banner']
+    cmd = [FFMPEG, '-y', '-hide_banner', '-hwaccel', 'auto']
 
     if args.start_frame > 0:
         cmd += ['-ss', str(args.start_frame / info['fps'])]
@@ -78,7 +78,7 @@ def build_cmd(input_path, output_path, args, encoder, info):
     if filters:
         cmd += ['-vf', ','.join(filters)]
 
-    cmd += ['-c:v', encoder, '-b:v', f'{args.bitrate}k', '-r', str(args.fps)]
+    cmd += ['-c:v', encoder, '-b:v', f'{args.bitrate}k', '-r', str(args.fps), '-threads', '0']
     if encoder in ('libx265', 'libx264', 'libvpx-vp9'):
         cmd += ['-preset', args.preset]
     cmd += ['-progress', 'pipe:1', '-nostats']
