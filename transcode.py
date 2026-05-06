@@ -78,7 +78,9 @@ def build_cmd(input_path, output_path, args, encoder, info):
     if filters:
         cmd += ['-vf', ','.join(filters)]
 
-    cmd += ['-c:v', encoder, '-b:v', f'{args.bitrate}k', '-r', str(args.fps), '-threads', '0']
+    cmd += ['-c:v', encoder, '-b:v', f'{args.bitrate}k', '-threads', '0']
+    if args.fps is not None:
+        cmd += ['-r', str(args.fps)]
     if encoder in ('libx265', 'libx264', 'libvpx-vp9'):
         cmd += ['-preset', args.preset]
     cmd += ['-progress', 'pipe:1', '-nostats']
@@ -131,7 +133,7 @@ def process_file(input_path, args, encoder):
     print(f"\n[Processing Config]")
     print(f"  output:     {output_path}")
     print(f"  frames:     {start} -> {end}  ({n_frames} frames)")
-    print(f"  fps:        {args.fps}  bitrate: {args.bitrate} kbps")
+    print(f"  fps:        {args.fps if args.fps else f'{info[\"fps\"]:.2f} (original)'}  bitrate: {args.bitrate} kbps")
     print(f"  resolution: {out_res.replace(':', 'x')}  codec: {args.codec} ({encoder})  preset: {args.preset}")
     print()
 
@@ -152,7 +154,7 @@ def main():
     parser.add_argument('-o', '--output', help='Output path (file or directory for batch)')
     parser.add_argument('--start-frame', type=int, default=0)
     parser.add_argument('--end-frame', type=int, default=-1)
-    parser.add_argument('--fps', type=float, default=30.0)
+    parser.add_argument('--fps', type=float, default=None, help='Output fps (default: keep original)')
     parser.add_argument('--bitrate', type=int, default=1000, help='kbps')
     parser.add_argument('--resolution', default='720p',
                         choices=list(RESOLUTIONS.keys()) + ['original'])
