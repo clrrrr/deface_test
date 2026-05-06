@@ -79,6 +79,8 @@ def build_cmd(input_path, output_path, args, encoder, info):
         cmd += ['-vf', ','.join(filters)]
 
     cmd += ['-c:v', encoder, '-b:v', f'{args.bitrate}k', '-r', str(args.fps)]
+    if encoder in ('libx265', 'libx264', 'libvpx-vp9'):
+        cmd += ['-preset', args.preset]
     cmd += ['-progress', 'pipe:1', '-nostats']
     cmd += [output_path]
     return cmd
@@ -130,7 +132,7 @@ def process_file(input_path, args, encoder):
     print(f"  output:     {output_path}")
     print(f"  frames:     {start} -> {end}  ({n_frames} frames)")
     print(f"  fps:        {args.fps}  bitrate: {args.bitrate} kbps")
-    print(f"  resolution: {out_res.replace(':', 'x')}  codec: {args.codec} ({encoder})")
+    print(f"  resolution: {out_res.replace(':', 'x')}  codec: {args.codec} ({encoder})  preset: {args.preset}")
     print()
 
     cmd = build_cmd(input_path, output_path, args, encoder, info)
@@ -155,6 +157,8 @@ def main():
     parser.add_argument('--resolution', default='720p',
                         choices=list(RESOLUTIONS.keys()) + ['original'])
     parser.add_argument('--codec', default='hevc', choices=['hevc', 'h264', 'vp9', 'av1'])
+    parser.add_argument('--preset', default='fast',
+                        choices=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow'])
     parser.add_argument('--gpu', default='auto',
                         choices=['auto', 'nvidia', 'amd', 'intel', 'cpu'])
     parser.add_argument('--format', default='mp4', dest='fmt')
