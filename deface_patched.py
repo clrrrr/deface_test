@@ -5,6 +5,7 @@ import csv
 import json
 import mimetypes
 import os
+import subprocess
 from typing import Dict, Tuple
 
 import tqdm
@@ -148,9 +149,21 @@ def video_detect(
 
     if opath is not None:
         _ffmpeg_config = ffmpeg_config.copy()
-        #  If fps is not explicitly set in ffmpeg_config, use source video fps value
         _ffmpeg_config.setdefault('fps', meta['fps'])
-        # Carry over audio from input path, use "copy" codec (no transcoding) by default
+        # Match source bitrate
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        try:
+            r = subprocess.run(
+                [ffmpeg_exe, '-i', ipath],
+                capture_output=True, text=True
+            )
+            import re
+            m = re.search(r'bitrate:\s*(\d+)\s*kb/s', r.stderr)
+            if m:
+                _ffmpeg_config.setdefault('bitrate', f"{m.group(1)}k")
+        except Exception:
+            pass
         if keep_audio and meta.get('audio_codec'):
             _ffmpeg_config.setdefault('audio_path', ipath)
             _ffmpeg_config.setdefault('audio_codec', 'copy')
