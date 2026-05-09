@@ -2,10 +2,13 @@
 
 import argparse
 import csv
+import glob
 import json
 import mimetypes
 import os
+import re
 import subprocess
+import time
 from typing import Dict, Tuple
 
 import tqdm
@@ -15,9 +18,67 @@ import imageio
 import imageio.v2 as iio
 import imageio.plugins.ffmpeg
 import cv2
+import imageio_ffmpeg
 
 from deface import __version__
 from deface.centerface import CenterFace
+
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+
+RESOLUTIONS = {
+    '480p':  '854:480',
+    '720p':  '1280:720',
+    '1080p': '1920:1080',
+    '4k':    '3840:2160',
+}
+ENCODERS = {
+    ('hevc', 'nvidia'): 'hevc_nvenc',
+    ('hevc', 'amd'):    'hevc_amf',
+    ('hevc', 'intel'):  'hevc_qsv',
+    ('hevc', 'cpu'):    'libx265',
+    ('h264', 'nvidia'): 'h264_nvenc',
+    ('h264', 'amd'):    'h264_amf',
+    ('h264', 'intel'):  'h264_qsv',
+    ('h264', 'cpu'):    'libx264',
+    ('vp9',  'cpu'):    'libvpx-vp9',
+    ('av1',  'cpu'):    'libaom-av1',
+}
+
+
+def detect_gpu():
+    for gpu, enc in [('nvidia', 'hevc_nvenc'), ('amd', 'hevc_amf'), ('intel', 'hevc_qsv')]:
+        r = subprocess.run(
+            [FFMPEG, '-f', 'lavfi', '-i', 'nullsrc=s=64x64', '-t', '0.1',
+             '-c:v', enc, '-f', 'null', '-'],
+            capture_output=True
+        )
+        if r.returncode == 0:
+            return gpu
+    return 'cpu'
+
+
+def transcode_file(ipath, opath, args, encoder):
+    """Run ffmpeg transcode on anonymized output, replacing it in-place via temp file."""
+    import tempfile
+    tmp = opath + '.tmp_transcode.mp4'
+    cmd = [FFMPEG, '-y', '-hide_banner', '-hwaccel', 'auto', '-i', opath]
+    filters = []
+    if args.fps is not None:
+        filters.append(f"fps={args.fps}")
+    if args.resolution != 'original':
+        filters.append(f"scale={RESOLUTIONS[args.resolution]}")
+    if filters:
+        cmd += ['-vf', ','.join(filters)]
+    cmd += ['-c:v', encoder, '-b:v', f'{args.bitrate}k', '-threads', '0']
+    if encoder in ('libx265', 'libx264', 'libvpx-vp9'):
+        cmd += ['-preset', args.preset]
+    cmd += [tmp]
+    rc = subprocess.run(cmd, capture_output=True).returncode
+    if rc == 0:
+        os.replace(tmp, opath)
+    elif os.path.exists(tmp):
+        os.remove(tmp)
+    return rc
 
 
 def scale_bb(x1, y1, x2, y2, mask_scale=1.0):
@@ -355,6 +416,26 @@ def parse_cli_args():
         help='Keep metadata of the original image. Default : False.')
     parser.add_argument('--help', '-h', action='help', help='Show this help message and exit.')
 
+    # Transcode options (only active when --tran is set)
+    parser.add_argument('--tran', default=False, action='store_true',
+        help='Enable transcoding after anonymization.')
+    parser.add_argument('--fps', type=float, default=None,
+        help='[--tran] Output fps (default: keep original)')
+    parser.add_argument('--bitrate', type=int, default=1000,
+        help='[--tran] Output bitrate in kbps (default: 1000)')
+    parser.add_argument('--resolution', default='original',
+        choices=list(RESOLUTIONS.keys()) + ['original'],
+        help='[--tran] Output resolution (default: original)')
+    parser.add_argument('--codec', default='hevc',
+        choices=['hevc', 'h264', 'vp9', 'av1'],
+        help='[--tran] Output codec (default: hevc)')
+    parser.add_argument('--preset', default='fast',
+        choices=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow'],
+        help='[--tran] Encoder preset (default: fast)')
+    parser.add_argument('--gpu', default='auto',
+        choices=['auto', 'nvidia', 'amd', 'intel', 'cpu'],
+        help='[--tran] GPU type for encoding (default: auto)')
+
     args = parser.parse_args()
 
     if len(args.input) == 0:
@@ -398,6 +479,12 @@ def main():
     execution_provider = args.execution_provider
     mosaicsize = args.mosaicsize
     keep_metadata = args.keep_metadata
+
+    tran_encoder = None
+    if args.tran:
+        gpu = detect_gpu() if args.gpu == 'auto' else args.gpu
+        tran_encoder = ENCODERS.get((args.codec, gpu)) or ENCODERS.get((args.codec, 'cpu'))
+        print(f"Transcode enabled: GPU={gpu}  Encoder={tran_encoder}")
     replaceimg = None
     if in_shape is not None:
         w, h = in_shape.split('x')
@@ -456,6 +543,11 @@ def main():
                         writer_csv.writerow(['filename', 'total_frames', 'face_frames', 'face_ratio'])
                     writer_csv.writerow([os.path.basename(ipath), total_frames, face_frames, f'{ratio:.4f}'])
                 print(f'Stats: {face_frames}/{total_frames} frames with faces ({ratio:.1%}) -> {csv_path}')
+            if args.tran and opath is not None and tran_encoder is not None:
+                print(f'Transcoding {opath} ...')
+                rc = transcode_file(ipath, opath, args, tran_encoder)
+                if rc != 0:
+                    print(f'Transcode failed (exit code {rc})')
         elif filetype == 'image':
             image_detect(
                 ipath=ipath,
