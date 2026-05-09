@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import csv
 import json
 import mimetypes
 import os
@@ -159,11 +160,16 @@ def video_detect(
 
     BATCH_SIZE = 8
     buf = []
+    total_frames = 0
+    face_frames = 0
     for frame in read_iter:
         buf.append(frame)
         if len(buf) >= BATCH_SIZE:
             batch_results = centerface.batch_call(buf, threshold=threshold)
             for f, (dets, _) in zip(buf, batch_results):
+                total_frames += 1
+                if len(dets) > 0:
+                    face_frames += 1
                 anonymize_frame(dets, f, mask_scale=mask_scale,
                     replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
                     replaceimg=replaceimg, mosaicsize=mosaicsize)
@@ -180,6 +186,9 @@ def video_detect(
     if buf:
         batch_results = centerface.batch_call(buf, threshold=threshold)
         for f, (dets, _) in zip(buf, batch_results):
+            total_frames += 1
+            if len(dets) > 0:
+                face_frames += 1
             anonymize_frame(dets, f, mask_scale=mask_scale,
                 replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
                 replaceimg=replaceimg, mosaicsize=mosaicsize)
@@ -190,6 +199,7 @@ def video_detect(
     if opath is not None:
         writer.close()
     bar.close()
+    return total_frames, face_frames
 
 
 def image_detect(
@@ -405,7 +415,7 @@ def main():
         if opath is None and not enable_preview:
             print('No output file is specified and the preview GUI is disabled. No output will be produced.')
         if filetype == 'video' or is_cam:
-            video_detect(
+            result = video_detect(
                 ipath=ipath,
                 opath=opath,
                 centerface=centerface,
@@ -422,6 +432,17 @@ def main():
                 replaceimg=replaceimg,
                 mosaicsize=mosaicsize
             )
+            if result is not None and not is_cam:
+                total_frames, face_frames = result
+                ratio = face_frames / total_frames if total_frames > 0 else 0.0
+                csv_path = os.path.join(os.path.dirname(os.path.abspath(ipath)), 'face_stats.csv')
+                file_exists = os.path.isfile(csv_path)
+                with open(csv_path, 'a', newline='', encoding='utf-8') as csvf:
+                    writer_csv = csv.writer(csvf)
+                    if not file_exists:
+                        writer_csv.writerow(['filename', 'total_frames', 'face_frames', 'face_ratio'])
+                    writer_csv.writerow([os.path.basename(ipath), total_frames, face_frames, f'{ratio:.4f}'])
+                print(f'Stats: {face_frames}/{total_frames} frames with faces ({ratio:.1%}) -> {csv_path}')
         elif filetype == 'image':
             image_detect(
                 ipath=ipath,
