@@ -6,8 +6,10 @@ import glob
 import json
 import mimetypes
 import os
+import queue
 import re
 import subprocess
+import threading
 import time
 from typing import Dict, Tuple
 
@@ -234,17 +236,29 @@ def video_detect(
         )
 
     BATCH_SIZE = batchsize
-    buf = []
     total_frames = 0
     face_frames = 0
-    for frame in read_iter:
-        buf.append(frame)
-        if len(buf) >= BATCH_SIZE:
-            batch_results = centerface.batch_call(buf, threshold=threshold)
-            for f, (dets, _) in zip(buf, batch_results):
-                total_frames += 1
-                if len(dets) > 0:
-                    face_frames += 1
+
+    raw_queue = queue.Queue(maxsize=4)
+    result_queue = queue.Queue(maxsize=4)
+
+    def _reader():
+        buf = []
+        for frame in read_iter:
+            buf.append(frame)
+            if len(buf) >= BATCH_SIZE:
+                raw_queue.put(buf)
+                buf = []
+        if buf:
+            raw_queue.put(buf)
+        raw_queue.put(None)
+
+    def _writer():
+        while True:
+            item = result_queue.get()
+            if item is None:
+                break
+            for f, dets in item:
                 anonymize_frame(dets, f, mask_scale=mask_scale,
                     replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
                     replaceimg=replaceimg, mosaicsize=mosaicsize)
@@ -254,22 +268,28 @@ def video_detect(
                     cv2.imshow('Preview of anonymization results (quit by pressing Q or Escape)', f[:, :, ::-1])
                     if cv2.waitKey(1) & 0xFF in [ord('q'), 27]:
                         cv2.destroyAllWindows()
-                        buf = []
-                        break
+                        return
                 bar.update()
-            buf = []
-    if buf:
+
+    threading.Thread(target=_reader, daemon=True).start()
+    writer_t = threading.Thread(target=_writer, daemon=True)
+    writer_t.start()
+
+    while True:
+        buf = raw_queue.get()
+        if buf is None:
+            result_queue.put(None)
+            break
         batch_results = centerface.batch_call(buf, threshold=threshold)
+        pairs = []
         for f, (dets, _) in zip(buf, batch_results):
             total_frames += 1
             if len(dets) > 0:
                 face_frames += 1
-            anonymize_frame(dets, f, mask_scale=mask_scale,
-                replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
-                replaceimg=replaceimg, mosaicsize=mosaicsize)
-            if opath is not None:
-                writer.append_data(f)
-            bar.update()
+            pairs.append((f, dets))
+        result_queue.put(pairs)
+
+    writer_t.join()
     reader.close()
     if opath is not None:
         writer.close()
