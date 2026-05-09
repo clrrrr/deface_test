@@ -181,6 +181,7 @@ def video_detect(
         replaceimg = None,
         keep_audio: bool = False,
         mosaicsize: int = 20,
+        batchsize: int = 8,
 ):
     try:
         if 'fps' in ffmpeg_config:
@@ -232,7 +233,7 @@ def video_detect(
             opath, format='FFMPEG', mode='I', **_ffmpeg_config
         )
 
-    BATCH_SIZE = 8
+    BATCH_SIZE = batchsize
     buf = []
     total_frames = 0
     face_frames = 0
@@ -435,6 +436,8 @@ def parse_cli_args():
     parser.add_argument('--gpu', default='auto',
         choices=['auto', 'nvidia', 'amd', 'intel', 'cpu'],
         help='[--tran] GPU type for encoding (default: auto)')
+    parser.add_argument('--batchsize', type=int, default=8, metavar='N',
+        help='Batch size for face detection inference (default: 8)')
 
     args = parser.parse_args()
 
@@ -530,7 +533,8 @@ def main():
                 keep_audio=keep_audio,
                 ffmpeg_config=ffmpeg_config,
                 replaceimg=replaceimg,
-                mosaicsize=mosaicsize
+                mosaicsize=mosaicsize,
+                batchsize=args.batchsize
             )
             if result is not None and not is_cam:
                 total_frames, face_frames = result
