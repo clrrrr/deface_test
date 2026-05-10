@@ -184,6 +184,7 @@ def video_detect(
         keep_audio: bool = False,
         mosaicsize: int = 20,
         batchsize: int = 8,
+        prefetch: int = 2,
 ):
     cam_reader = None
     if cam:
@@ -227,8 +228,8 @@ def video_detect(
     BATCH_SIZE = batchsize
     total_frames = 0
     face_frames = 0
-    raw_queue = queue.Queue(maxsize=2)
-    result_queue = queue.Queue(maxsize=2)
+    raw_queue = queue.Queue(maxsize=prefetch)
+    result_queue = queue.Queue(maxsize=prefetch)
 
     def _reader():
         if cam:
@@ -466,6 +467,8 @@ def parse_cli_args():
         help='[--tran] GPU type for encoding (default: auto)')
     parser.add_argument('--batchsize', type=int, default=8, metavar='N',
         help='Batch size for face detection inference (default: 8)')
+    parser.add_argument('--prefetch', type=int, default=2, metavar='N',
+        help='Queue depth for frame prefetch (default: 2)')
 
     args = parser.parse_args()
 
@@ -562,7 +565,8 @@ def main():
                 ffmpeg_config=ffmpeg_config,
                 replaceimg=replaceimg,
                 mosaicsize=mosaicsize,
-                batchsize=args.batchsize
+                batchsize=args.batchsize,
+                prefetch=args.prefetch
             )
             if result is not None and not is_cam:
                 total_frames, face_frames = result
