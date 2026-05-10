@@ -242,7 +242,7 @@ def video_detect(
             if buf:
                 raw_queue.put(buf)
         else:
-            cmd = [FFMPEG, '-hwaccel', 'auto', '-i', ipath,
+            cmd = [FFMPEG, '-hwaccel', 'auto', '-threads', '0', '-i', ipath,
                    '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             frame_bytes = w * h * 3
