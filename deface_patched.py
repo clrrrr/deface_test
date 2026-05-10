@@ -185,27 +185,30 @@ def video_detect(
         mosaicsize: int = 20,
         batchsize: int = 8,
 ):
-    try:
-        if 'fps' in ffmpeg_config:
-            reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader = imageio.get_reader(ipath, fps=ffmpeg_config['fps'])
-        else:
-            reader: imageio.plugins.ffmpeg.FfmpegFormat.Reader = imageio.get_reader(ipath)
-
-        meta = reader.get_meta_data()
-        _ = meta['size']
-    except:
-        if cam:
-            print(f'Could not find video device {ipath}. Please set a valid input.')
-        else:
-            print(f'Could not open file {ipath} as a video file with imageio. Skipping file...')
-        return
-
+    cam_reader = None
     if cam:
-        nframes = None
-        read_iter = cam_read_iter(reader)
+        try:
+            cam_reader = imageio.get_reader(ipath)
+            meta = cam_reader.get_meta_data()
+            fps = meta['fps']
+            w, h = meta['size']
+            nframes = None
+        except:
+            print(f'Could not find video device {ipath}. Please set a valid input.')
+            return
     else:
-        read_iter = reader.iter_data()
-        nframes = reader.count_frames()
+        cap = cv2.VideoCapture(ipath)
+        if not cap.isOpened():
+            print(f'Could not open file {ipath} as a video file. Skipping file...')
+            return
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        nframes = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = nframes / fps if fps > 0 else 0
+        src_bitrate = int(os.path.getsize(ipath) * 8 / duration / 1000) if duration > 0 else 0
+        cap.release()
+
     if nested:
         bar = tqdm.tqdm(dynamic_ncols=True, total=nframes, position=1, leave=True)
     else:
@@ -213,44 +216,48 @@ def video_detect(
 
     if opath is not None:
         _ffmpeg_config = ffmpeg_config.copy()
-        _ffmpeg_config.setdefault('fps', meta['fps'])
-        # Match source bitrate
-        import imageio_ffmpeg
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        try:
-            r = subprocess.run(
-                [ffmpeg_exe, '-i', ipath],
-                capture_output=True, text=True
-            )
-            import re
-            m = re.search(r'bitrate:\s*(\d+)\s*kb/s', r.stderr)
-            if m:
-                _ffmpeg_config.setdefault('bitrate', f"{m.group(1)}k")
-        except Exception:
-            pass
-        if keep_audio and meta.get('audio_codec'):
+        _ffmpeg_config.setdefault('fps', fps)
+        if not cam:
+            _ffmpeg_config.setdefault('bitrate', f'{src_bitrate}k')
+        if keep_audio:
             _ffmpeg_config.setdefault('audio_path', ipath)
             _ffmpeg_config.setdefault('audio_codec', 'copy')
-        writer: imageio.plugins.ffmpeg.FfmpegFormat.Writer = imageio.get_writer(
-            opath, format='FFMPEG', mode='I', **_ffmpeg_config
-        )
+        writer = imageio.get_writer(opath, format='FFMPEG', mode='I', **_ffmpeg_config)
 
     BATCH_SIZE = batchsize
     total_frames = 0
     face_frames = 0
-
-    raw_queue = queue.Queue(maxsize=4)
-    result_queue = queue.Queue(maxsize=4)
+    raw_queue = queue.Queue(maxsize=2)
+    result_queue = queue.Queue(maxsize=2)
 
     def _reader():
-        buf = []
-        for frame in read_iter:
-            buf.append(frame)
-            if len(buf) >= BATCH_SIZE:
+        if cam:
+            buf = []
+            for frame in cam_read_iter(cam_reader):
+                buf.append(frame)
+                if len(buf) >= BATCH_SIZE:
+                    raw_queue.put(buf)
+                    buf = []
+            if buf:
                 raw_queue.put(buf)
-                buf = []
-        if buf:
-            raw_queue.put(buf)
+        else:
+            cmd = [FFMPEG, '-hwaccel', 'auto', '-i', ipath,
+                   '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            frame_bytes = w * h * 3
+            buf = []
+            while True:
+                raw = proc.stdout.read(frame_bytes)
+                if len(raw) < frame_bytes:
+                    break
+                frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3)).copy()
+                buf.append(frame)
+                if len(buf) >= BATCH_SIZE:
+                    raw_queue.put(buf)
+                    buf = []
+            if buf:
+                raw_queue.put(buf)
+            proc.wait()
         raw_queue.put(None)
 
     def _writer():
@@ -290,7 +297,8 @@ def video_detect(
         result_queue.put(pairs)
 
     writer_t.join()
-    reader.close()
+    if cam_reader is not None:
+        cam_reader.close()
     if opath is not None:
         writer.close()
     bar.close()
