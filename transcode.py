@@ -4,6 +4,7 @@ import subprocess
 import os
 import glob
 import sys
+import io
 import time
 import cv2
 from tqdm import tqdm
@@ -100,7 +101,8 @@ def run_with_progress(cmd, n_frames, label, progress_cb=None, stop_event=None):
         kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             text=True, **kwargs)
-    with tqdm(total=n_frames, unit='frame', ncols=90, desc=label) as pbar:
+    tqdm_out = None if progress_cb is None else io.StringIO()
+    with tqdm(total=n_frames, unit='frame', ncols=90, desc=label, file=tqdm_out) as pbar:
         current = 0
         for line in proc.stdout:
             if stop_event and stop_event.is_set():

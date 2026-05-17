@@ -41,7 +41,7 @@ class App(tk.Tk):
         self.title('Video Transcoder')
         self.minsize(720, 560)
         self._stop_event = threading.Event()
-        self._total_start = self._file_start = 0.0
+        self._total_start = self._file_start = self._last_ui_update = 0.0
         self._build_folder_panel()
         self._build_params_panel()
         self._build_bottom_panel()
@@ -123,6 +123,9 @@ class App(tk.Tk):
         self.file_bar = ttk.Progressbar(prog_frm, mode='determinate')
         self.file_bar.grid(row=1, column=1, sticky='ew', padx=8)
 
+        self.current_file_label = ttk.Label(prog_frm, text='', anchor='w', foreground='gray')
+        self.current_file_label.grid(row=2, column=0, columnspan=2, sticky='ew', padx=2)
+
         prog_frm.columnconfigure(1, weight=1)
 
         self.log_text = scrolledtext.ScrolledText(self, height=10, state='disabled')
@@ -166,14 +169,17 @@ class App(tk.Tk):
         elapsed = time.time() - self._total_start
         eta = (elapsed / cur * (total - cur)) if cur > 0 else float('inf')
         text = f'总进度: {cur}/{total}  已用:{fmt_time(elapsed)}  剩余:{fmt_time(eta)}'
-        if name:
-            text += f'  {name}'
         self.after(0, lambda: (
             self.total_bar.configure(maximum=max(total, 1), value=cur),
             self.total_label.configure(text=text),
+            self.current_file_label.configure(text=name),
         ))
 
     def _set_file(self, cur, total):
+        now = time.time()
+        if cur < total and now - self._last_ui_update < 0.2:
+            return
+        self._last_ui_update = now
         elapsed = time.time() - self._file_start
         eta = (elapsed / cur * (total - cur)) if cur > 0 else float('inf')
         text = f'当前文件: {cur}/{total}帧  已用:{fmt_time(elapsed)}  剩余:{fmt_time(eta)}'
