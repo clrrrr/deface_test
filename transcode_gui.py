@@ -9,7 +9,7 @@ ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\r')
 
 
 def fmt_time(seconds):
-    if seconds < 0 or seconds != seconds:  # negative or nan
+    if not (0 <= seconds < float('inf')):
         return '--:--'
     s = int(seconds)
     return f'{s//60:02d}:{s%60:02d}'
