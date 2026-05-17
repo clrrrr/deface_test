@@ -227,9 +227,12 @@ class App(tk.Tk):
                 self._file_start = time.time()
                 self._set_file(0, 1)
                 print(f"\n[{idx+1}/{total}] {f}")
-                transcode.process_file(f, args, encoder,
-                                       progress_cb=self._set_file,
-                                       stop_event=self._stop_event)
+                try:
+                    transcode.process_file(f, args, encoder,
+                                           progress_cb=self._set_file,
+                                           stop_event=self._stop_event)
+                except Exception as e:
+                    print(f"  跳过: {e}")
                 self._set_total(idx + 1, total, name)
 
             if not self._stop_event.is_set():

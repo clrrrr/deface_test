@@ -3,6 +3,7 @@ import argparse
 import subprocess
 import os
 import glob
+import sys
 import time
 import cv2
 from tqdm import tqdm
@@ -34,15 +35,17 @@ ENCODERS = {
 
 def get_video_info(path):
     cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {path}")
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
     codec = ''.join(chr((fourcc >> 8 * i) & 0xFF) for i in range(4)).strip()
     cap.release()
-    size = os.path.getsize(path)
-    duration = total / fps if fps > 0 else 0
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    duration = total / fps
     bitrate = int(size * 8 / duration / 1000) if duration > 0 else 0
     fmt = os.path.splitext(path)[1].lstrip('.')
     return {'fps': fps, 'nframes': total, 'width': w, 'height': h,
@@ -50,11 +53,12 @@ def get_video_info(path):
 
 
 def detect_gpu():
+    kwargs = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
     for gpu, enc in [('nvidia', 'hevc_nvenc'), ('amd', 'hevc_amf'), ('intel', 'hevc_qsv')]:
         r = subprocess.run(
             [FFMPEG, '-f', 'lavfi', '-i', 'nullsrc=s=64x64', '-t', '0.1',
              '-c:v', enc, '-f', 'null', '-'],
-            capture_output=True
+            capture_output=True, **kwargs
         )
         if r.returncode == 0:
             return gpu
@@ -155,7 +159,7 @@ def process_file(input_path, args, encoder, progress_cb=None, stop_event=None):
     rc = run_with_progress(cmd, n_frames, os.path.basename(input_path), progress_cb, stop_event)
 
     if rc == 0:
-        out_size = os.path.getsize(output_path) / 1024 / 1024
+        out_size = os.path.getsize(output_path) / 1024 / 1024 if os.path.exists(output_path) else 0
         print(f"Done -> {output_path}  ({out_size:.2f} MB)")
     else:
         print(f"Error: ffmpeg exited with code {rc}")
