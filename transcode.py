@@ -90,11 +90,18 @@ def build_cmd(input_path, output_path, args, encoder, info):
     return cmd
 
 
-def run_with_progress(cmd, n_frames, label, progress_cb=None):
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+def run_with_progress(cmd, n_frames, label, progress_cb=None, stop_event=None):
+    kwargs = {}
+    if sys.platform == 'win32':
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True, **kwargs)
     with tqdm(total=n_frames, unit='frame', ncols=90, desc=label) as pbar:
         current = 0
         for line in proc.stdout:
+            if stop_event and stop_event.is_set():
+                proc.terminate()
+                break
             if line.startswith('frame='):
                 try:
                     f = int(line.split('=')[1].strip())
@@ -111,7 +118,7 @@ def run_with_progress(cmd, n_frames, label, progress_cb=None):
     return proc.returncode
 
 
-def process_file(input_path, args, encoder, progress_cb=None):
+def process_file(input_path, args, encoder, progress_cb=None, stop_event=None):
     info = get_video_info(input_path)
     start = args.start_frame
     end = info['nframes'] if args.end_frame < 0 else min(args.end_frame, info['nframes'])
@@ -145,7 +152,7 @@ def process_file(input_path, args, encoder, progress_cb=None):
     print()
 
     cmd = build_cmd(input_path, output_path, args, encoder, info)
-    rc = run_with_progress(cmd, n_frames, os.path.basename(input_path), progress_cb)
+    rc = run_with_progress(cmd, n_frames, os.path.basename(input_path), progress_cb, stop_event)
 
     if rc == 0:
         out_size = os.path.getsize(output_path) / 1024 / 1024
