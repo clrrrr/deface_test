@@ -83,12 +83,14 @@ def build_cmd(input_path, output_path, args, encoder, info):
     cmd += ['-c:v', encoder, '-b:v', f'{args.bitrate}k', '-threads', '0']
     if encoder in ('libx265', 'libx264', 'libvpx-vp9'):
         cmd += ['-preset', args.preset]
+    if not args.keep_audio:
+        cmd += ['-an']
     cmd += ['-progress', 'pipe:1', '-nostats']
     cmd += [output_path]
     return cmd
 
 
-def run_with_progress(cmd, n_frames, label):
+def run_with_progress(cmd, n_frames, label, progress_cb=None):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     with tqdm(total=n_frames, unit='frame', ncols=90, desc=label) as pbar:
         current = 0
@@ -98,14 +100,18 @@ def run_with_progress(cmd, n_frames, label):
                     f = int(line.split('=')[1].strip())
                     pbar.update(f - current)
                     current = f
+                    if progress_cb:
+                        progress_cb(current, n_frames)
                 except ValueError:
                     pass
         pbar.update(n_frames - current)
+        if progress_cb:
+            progress_cb(n_frames, n_frames)
     proc.wait()
     return proc.returncode
 
 
-def process_file(input_path, args, encoder):
+def process_file(input_path, args, encoder, progress_cb=None):
     info = get_video_info(input_path)
     start = args.start_frame
     end = info['nframes'] if args.end_frame < 0 else min(args.end_frame, info['nframes'])
@@ -139,7 +145,7 @@ def process_file(input_path, args, encoder):
     print()
 
     cmd = build_cmd(input_path, output_path, args, encoder, info)
-    rc = run_with_progress(cmd, n_frames, os.path.basename(input_path))
+    rc = run_with_progress(cmd, n_frames, os.path.basename(input_path), progress_cb)
 
     if rc == 0:
         out_size = os.path.getsize(output_path) / 1024 / 1024
@@ -165,6 +171,7 @@ def main():
     parser.add_argument('--gpu', default='auto',
                         choices=['auto', 'nvidia', 'amd', 'intel', 'cpu'])
     parser.add_argument('--format', default='mp4', dest='fmt')
+    parser.add_argument('--keep-audio', action='store_true', help='Keep audio (default: mute)')
     args = parser.parse_args()
 
     # Resolve GPU

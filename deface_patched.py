@@ -185,6 +185,7 @@ def video_detect(
         mosaicsize: int = 20,
         batchsize: int = 8,
         prefetch: int = 2,
+        preset: str = None,
 ):
     cam_reader = None
     if cam:
@@ -223,6 +224,9 @@ def video_detect(
         if keep_audio:
             _ffmpeg_config.setdefault('audio_path', ipath)
             _ffmpeg_config.setdefault('audio_codec', 'copy')
+        codec = _ffmpeg_config.get('codec', 'libx264')
+        if preset is not None and codec in ('libx264', 'libx265', 'libvpx-vp9'):
+            _ffmpeg_config['output_params'] = ['-preset', preset]
         writer = imageio.get_writer(opath, format='FFMPEG', mode='I', **_ffmpeg_config)
 
     BATCH_SIZE = batchsize
@@ -566,7 +570,8 @@ def main():
                 replaceimg=replaceimg,
                 mosaicsize=mosaicsize,
                 batchsize=args.batchsize,
-                prefetch=args.prefetch
+                prefetch=args.prefetch,
+                preset=args.preset
             )
             if result is not None and not is_cam:
                 total_frames, face_frames = result
