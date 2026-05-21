@@ -24,15 +24,23 @@ def read_log(out_dir):
         return {'done': [], 'interrupted': None}
     try:
         with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            data = json.load(f)
+        if not isinstance(data.get('done'), list):
+            data['done'] = []
+        if not isinstance(data.get('interrupted'), (str, type(None))):
+            data['interrupted'] = None
+        return data
     except Exception:
         return {'done': [], 'interrupted': None}
 
 
 def write_log(out_dir, done, interrupted=None):
     path = os.path.join(out_dir, LOG_FILE)
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump({'done': done, 'interrupted': interrupted}, f, ensure_ascii=False)
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'done': done, 'interrupted': interrupted}, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 # ── stdout 重定向 ───────────────────────────────────────────────
@@ -320,15 +328,6 @@ class App(tk.Tk):
                     folder_done[folder] = list(read_log(out_dir)['done'])
 
             for idx, (folder, f) in enumerate(pending):
-                if self._stop_event.is_set():
-                    # 记录中断状态
-                    name = os.path.basename(f)
-                    out_dir = os.path.join(folder, 'trans')
-                    write_log(out_dir, folder_done[folder], interrupted=name)
-                    self._set_status([(f'已停止，{name} 被中断，下次将从此文件继续', 'interrupted')])
-                    print(f"\n已停止，中断于: {name}")
-                    break
-
                 out_dir = os.path.join(folder, 'trans')
                 os.makedirs(out_dir, exist_ok=True)
                 args.output = out_dir
@@ -346,11 +345,15 @@ class App(tk.Tk):
                     rc = transcode.process_file(f, args, encoder,
                                                progress_cb=self._set_file,
                                                stop_event=self._stop_event)
-                    if rc == 0:
+                    if rc == 0 and not self._stop_event.is_set():
                         # 成功完成，记入 done，清除 interrupted
                         folder_done[folder].append(name)
                         write_log(out_dir, folder_done[folder], interrupted=None)
-                    # rc != 0 且非异常 = 被 stop_event 中断，interrupted 已在开始前写好，保持不变
+                    elif self._stop_event.is_set():
+                        # 当前文件被中断，interrupted 已在开始前写好（就是 name），直接 break
+                        self._set_status([(f'已停止，{name} 被中断，下次将从此文件继续', 'interrupted')])
+                        print(f"\n已停止，中断于: {name}")
+                        break
                 except Exception as e:
                     print(f"  跳过: {e}")
 
