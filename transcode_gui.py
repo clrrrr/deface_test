@@ -356,8 +356,8 @@ class App(tk.Tk):
 
             else:
                 print("\n全部完成。")
-                # 清理所有 log
-                for done_folder in set(folder for folder, _ in pending):
+                # 清理所有 log（用原始 folders 列表，不依赖 pending）
+                for done_folder in folders:
                     out_dir = os.path.join(done_folder, 'trans')
                     log_path = os.path.join(out_dir, LOG_FILE)
                     try:
