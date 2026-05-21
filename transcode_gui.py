@@ -343,12 +343,14 @@ class App(tk.Tk):
                 self._set_file(0, 1)
                 print(f"\n[{idx+1}/{total}] {f}")
                 try:
-                    transcode.process_file(f, args, encoder,
-                                           progress_cb=self._set_file,
-                                           stop_event=self._stop_event)
-                    # 成功完成，记入 done，清除 interrupted
-                    folder_done[folder].append(name)
-                    write_log(out_dir, folder_done[folder], interrupted=None)
+                    rc = transcode.process_file(f, args, encoder,
+                                               progress_cb=self._set_file,
+                                               stop_event=self._stop_event)
+                    if rc == 0:
+                        # 成功完成，记入 done，清除 interrupted
+                        folder_done[folder].append(name)
+                        write_log(out_dir, folder_done[folder], interrupted=None)
+                    # rc != 0 且非异常 = 被 stop_event 中断，interrupted 已在开始前写好，保持不变
                 except Exception as e:
                     print(f"  跳过: {e}")
 
