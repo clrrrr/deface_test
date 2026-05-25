@@ -66,7 +66,7 @@ def detect_gpu():
     return 'cpu'
 
 
-def build_cmd(input_path, output_path, args, encoder, info):
+def build_cmd(input_path, output_path, args, encoder, info, target_br=None):
     cmd = [FFMPEG, '-y', '-hide_banner', '-hwaccel', 'auto']
 
     if args.start_frame > 0:
@@ -85,7 +85,23 @@ def build_cmd(input_path, output_path, args, encoder, info):
     if filters:
         cmd += ['-vf', ','.join(filters)]
 
-    cmd += ['-c:v', encoder, '-b:v', f'{args.bitrate}k', '-threads', '0']
+    br = target_br if target_br is not None else args.bitrate
+    bufsize = br * 2
+    cmd += ['-c:v', encoder, '-b:v', f'{br}k', '-threads', '0']
+    cmd += ['-minrate', f'{br}k', '-maxrate', f'{br}k', '-bufsize', f'{bufsize}k']
+    # 各编码器强制 CBR
+    if encoder.endswith('_nvenc') or encoder.endswith('_amf'):
+        cmd += ['-rc', 'cbr']
+    elif encoder.endswith('_qsv'):
+        # QSV: min==max==target 时自动进入 CBR 模式，无需额外参数
+        pass
+    elif encoder == 'libx264':
+        cmd += ['-x264-params', 'nal-hrd=cbr']
+    elif encoder == 'libx265':
+        cmd += ['-x265-params',
+                f'vbv-maxrate={br}:vbv-minrate={br}:vbv-bufsize={bufsize}:strict-cbr=1']
+    elif encoder == 'libaom-av1':
+        cmd += ['-aom-params', 'end-usage=cbr']
     if encoder in ('libx265', 'libx264', 'libvpx-vp9'):
         cmd += ['-preset', args.preset]
     if not args.keep_audio:
@@ -136,7 +152,7 @@ def process_file(input_path, args, encoder, progress_cb=None, stop_event=None):
         output_path = args.output
     else:
         out_dir = args.output if (args.output and os.path.isdir(args.output)) else dirname
-        suffix = f"_{start}_{end}_compress" if (start != 0 or args.end_frame >= 0) else "_full_compress"
+        suffix = f"_{start}_{end}_comp" if (start != 0 or args.end_frame >= 0) else "_comp"
         output_path = os.path.join(out_dir, f"{basename}{suffix}.{args.fmt}")
 
     print(f"\n[Input Video Info]  {input_path}")
@@ -157,12 +173,37 @@ def process_file(input_path, args, encoder, progress_cb=None, stop_event=None):
     print(f"  resolution: {out_res.replace(':', 'x')}  codec: {args.codec} ({encoder})  preset: {args.preset}")
     print()
 
-    cmd = build_cmd(input_path, output_path, args, encoder, info)
-    rc = run_with_progress(cmd, n_frames, os.path.basename(input_path), progress_cb, stop_event)
+    user_br = args.bitrate
+    duration = n_frames / info['fps'] if info['fps'] > 0 else 0
+
+    def _encode(target_br, label_suffix=''):
+        c = build_cmd(input_path, output_path, args, encoder, info, target_br=target_br)
+        rc = run_with_progress(c, n_frames,
+                               os.path.basename(input_path) + label_suffix,
+                               progress_cb, stop_event)
+        if rc != 0 or duration <= 0:
+            return rc, 0
+        b = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+        return rc, int(b * 8 / duration / 1000)
+
+    # 首轮：按设定值严格 CBR 编码
+    rc, actual_br = _encode(user_br)
+
+    # 若实测低于设定值，按比例提一档重编（仅一次，避免无限循环）
+    if rc == 0 and duration > 0 and actual_br < user_br and not (stop_event and stop_event.is_set()):
+        # 提档比例：补足缺口 + 10% 余量，下限 +15%，上限 +50%
+        ratio = max(1.15, min(1.50, (user_br / max(actual_br, 1)) * 1.10))
+        boosted = int(user_br * ratio)
+        print(f"  [Retry] 实测 {actual_br} kbps < 设定 {user_br} kbps，提升目标至 {boosted} kbps 重编")
+        rc, actual_br = _encode(boosted, ' (retry)')
 
     if rc == 0:
-        out_size = os.path.getsize(output_path) / 1024 / 1024 if os.path.exists(output_path) else 0
-        print(f"Done -> {output_path}  ({out_size:.2f} MB)")
+        out_bytes = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+        out_mb = out_bytes / 1024 / 1024
+        msg = f"Done -> {output_path}  ({out_mb:.2f} MB, {actual_br} kbps, 设定 {user_br} kbps)"
+        if duration > 0 and actual_br < user_br:
+            msg += f"  [WARN] 重编后仍低于设定，可能受片段长度/内容复杂度限制"
+        print(msg)
     else:
         print(f"Error: ffmpeg exited with code {rc}")
     return rc
