@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-import sys, os, glob, types, threading, io, re, time, json
+import sys, os, glob, types, threading, io, re, time, json, shutil
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext
+from concurrent.futures import ThreadPoolExecutor
 import transcode
 
 VIDEO_EXTS = ('mp4', 'MP4', 'mov', 'MOV', 'avi', 'AVI', 'mkv', 'MKV')
@@ -65,6 +66,43 @@ class TextRedirector(io.TextIOBase):
         self.widget.configure(state='disabled')
 
 
+# ── 预取（NAS -> 本地）─────────────────────────────────────────
+
+def _prefetch(src, preload_dir, stop_event):
+    """复制 src 到 preload_dir，返回本地副本路径；同盘/空间不足/失败/被停止时返回原 src。"""
+    if not preload_dir or stop_event.is_set():
+        return src
+    try:
+        src_drv = os.path.splitdrive(os.path.abspath(src))[0].lower()
+        pre_drv = os.path.splitdrive(os.path.abspath(preload_dir))[0].lower()
+        if src_drv and src_drv == pre_drv:
+            return src                                              # 同盘，无需预取
+        size = os.path.getsize(src)
+        if shutil.disk_usage(preload_dir).free < size * 1.2:
+            print(f"  [Prefetch] 空间不足，回落直读: {os.path.basename(src)}")
+            return src
+        name = os.path.basename(src)
+        tmp = os.path.join(preload_dir, name + '.tmp')
+        dst = os.path.join(preload_dir, name)
+        t0 = time.time()
+        with open(src, 'rb') as fi, open(tmp, 'wb') as fo:
+            while not stop_event.is_set():
+                chunk = fi.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                fo.write(chunk)
+        if stop_event.is_set():
+            try: os.remove(tmp)
+            except Exception: pass
+            return src
+        os.replace(tmp, dst)
+        print(f"  [Prefetch] {name} 就绪 ({size/1024/1024:.1f} MB, {time.time()-t0:.1f}s)")
+        return dst
+    except Exception as e:
+        print(f"  [Prefetch] 失败，回落直读: {e}")
+        return src
+
+
 # ── 主窗口 ──────────────────────────────────────────────────────
 
 class App(tk.Tk):
@@ -75,6 +113,7 @@ class App(tk.Tk):
         self._stop_event = threading.Event()
         self._total_start = self._file_start = self._last_ui_update = 0.0
         self._build_folder_panel()
+        self._build_preload_panel()
         self._build_params_panel()
         self._build_status_panel()
         self._build_bottom_panel()
@@ -97,6 +136,20 @@ class App(tk.Tk):
         ttk.Button(btn_frm, text='添加文件夹',   command=self.add_folder).pack(pady=2, fill='x')
         ttk.Button(btn_frm, text='添加母文件夹', command=self.add_parent_folder).pack(pady=2, fill='x')
         ttk.Button(btn_frm, text='删除选中',     command=self.remove_selected).pack(pady=2, fill='x')
+
+    # ── 预加载面板 ──────────────────────────────────────────────
+    def _build_preload_panel(self):
+        frm = ttk.Frame(self)
+        frm.pack(fill='x', padx=8, pady=2)
+        ttk.Label(frm, text='预加载文件夹（可选，建议本地盘）:').pack(side='left')
+        self.preload_var = tk.StringVar(value='')
+        ttk.Entry(frm, textvariable=self.preload_var).pack(side='left', fill='x', expand=True, padx=4)
+        ttk.Button(frm, text='浏览', command=self._choose_preload).pack(side='left')
+
+    def _choose_preload(self):
+        d = filedialog.askdirectory(title='选择预加载文件夹')
+        if d:
+            self.preload_var.set(d)
 
     # ── 参数面板 ────────────────────────────────────────────────
     def _build_params_panel(self):
@@ -267,6 +320,9 @@ class App(tk.Tk):
     def _worker(self, folders, params):
         old_out, old_err = sys.stdout, sys.stderr
         sys.stdout = sys.stderr = TextRedirector(self.log_text)
+        executor = None
+        next_future = None
+        preload_dir = None
         try:
             gpu = transcode.detect_gpu() if params['gpu'] == 'auto' else params['gpu']
             encoder = (transcode.ENCODERS.get((params['codec'], gpu))
@@ -320,6 +376,18 @@ class App(tk.Tk):
             self._total_start = time.time()
             self._set_total(0, total)
 
+            # 预加载（NAS -> 本地）流水线
+            preload_dir = self.preload_var.get().strip() or None
+            if preload_dir:
+                try:
+                    os.makedirs(preload_dir, exist_ok=True)
+                except Exception as e:
+                    print(f"预加载目录不可用，回落直读: {e}")
+                    preload_dir = None
+            if preload_dir:
+                executor = ThreadPoolExecutor(max_workers=1)
+                print(f"预加载目录: {preload_dir}")
+
             # 按文件夹维护各自的 done 列表
             folder_done = {}
             for folder, _ in pending:
@@ -328,6 +396,20 @@ class App(tk.Tk):
                     folder_done[folder] = list(read_log(out_dir)['done'])
 
             for idx, (folder, f) in enumerate(pending):
+                # 取本轮输入：上一轮提交的预取（或源路径）
+                if next_future is not None:
+                    try:
+                        input_path = next_future.result() or f
+                    except Exception:
+                        input_path = f
+                    next_future = None
+                else:
+                    input_path = f
+                # 提交下一个文件的预取
+                if executor and idx + 1 < len(pending):
+                    nxt_src = pending[idx + 1][1]
+                    next_future = executor.submit(_prefetch, nxt_src, preload_dir, self._stop_event)
+
                 out_dir = os.path.join(folder, 'trans')
                 os.makedirs(out_dir, exist_ok=True)
                 args.output = out_dir
@@ -341,8 +423,10 @@ class App(tk.Tk):
                 self._file_start = time.time()
                 self._set_file(0, 1)
                 print(f"\n[{idx+1}/{total}] {f}")
+                if input_path != f:
+                    print(f"  使用本地副本: {input_path}")
                 try:
-                    rc = transcode.process_file(f, args, encoder,
+                    rc = transcode.process_file(input_path, args, encoder,
                                                progress_cb=self._set_file,
                                                stop_event=self._stop_event)
                     if rc == 0 and not self._stop_event.is_set():
@@ -356,6 +440,11 @@ class App(tk.Tk):
                         break
                 except Exception as e:
                     print(f"  跳过: {e}")
+                finally:
+                    # 清理已用完的本地副本
+                    if input_path != f and os.path.isfile(input_path):
+                        try: os.remove(input_path)
+                        except Exception: pass
 
                 self._set_total(idx + 1, total, name)
 
@@ -377,6 +466,18 @@ class App(tk.Tk):
         except Exception as e:
             print(f"\n错误: {e}")
         finally:
+            # 清理预取：等掉 in-flight、删本地副本、shutdown executor
+            if executor:
+                if next_future is not None:
+                    try:
+                        p = next_future.result(timeout=1.0)
+                        if (p and preload_dir
+                                and os.path.dirname(os.path.abspath(p)) == os.path.abspath(preload_dir)
+                                and os.path.isfile(p)):
+                            os.remove(p)
+                    except Exception:
+                        pass
+                executor.shutdown(wait=False, cancel_futures=True)
             sys.stdout, sys.stderr = old_out, old_err
             self.after(0, lambda: (
                 self.start_btn.configure(state='normal'),
