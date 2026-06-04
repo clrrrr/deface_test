@@ -170,11 +170,15 @@ def build_encoder_args(probe, target_k):
     return args
 
 
-def build_writer_cmd_file(opath, w, h, fps_str, probe, target_k, preset=None):
-    """ffmpeg cmd: raw rgb24 stdin -> encoded file (passthrough source params)."""
+def build_writer_cmd_file(opath, w, h, fps_str, probe, target_k, preset=None, src_path=None):
+    """ffmpeg cmd: raw rgb24 stdin -> encoded file (passthrough source params + metadata)."""
     cmd = [FFMPEG, '-y', '-hide_banner', '-loglevel', 'error',
            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{w}x{h}', '-r', fps_str,
-           '-i', 'pipe:0', '-an']
+           '-i', 'pipe:0']
+    if src_path:
+        # Second input: source file. Used only for container metadata.
+        cmd += ['-i', src_path, '-map', '0:v', '-map_metadata', '1']
+    cmd += ['-an']
     cmd += build_encoder_args(probe, target_k)
     encoder = CODEC_TO_ENCODER.get(probe['codec'], 'libx264')
     if preset and encoder in ('libx264', 'libx265', 'libvpx-vp9'):
@@ -227,10 +231,14 @@ def measure_bitrate_k(path):
     return int(sz * 8 / dur / 1000) if dur > 0 and sz > 0 else 0
 
 
-def re_encode_bitrate(opath, probe, target_k, preset=None):
-    """Re-encode opath in-place with higher bitrate target. Used when first pass undershoots."""
+def re_encode_bitrate(opath, probe, target_k, preset=None, src_path=None):
+    """Re-encode opath in-place with higher bitrate target. Used when first pass undershoots.
+    If src_path is given, container metadata is mapped from there (not from the intermediate)."""
     tmp = opath + '.tmp_rebr' + os.path.splitext(opath)[1]
-    cmd = [FFMPEG, '-y', '-hide_banner', '-loglevel', 'error', '-i', opath, '-an']
+    cmd = [FFMPEG, '-y', '-hide_banner', '-loglevel', 'error', '-i', opath]
+    if src_path:
+        cmd += ['-i', src_path, '-map', '0:v', '-map_metadata', '1']
+    cmd += ['-an']
     cmd += build_encoder_args(probe, target_k)
     encoder = CODEC_TO_ENCODER.get(probe['codec'], 'libx264')
     if preset and encoder in ('libx264', 'libx265', 'libvpx-vp9'):
@@ -383,7 +391,8 @@ def video_detect(
     if opath is not None:
         if probe is not None:
             target_k = max(int(probe['bitrate_k'] * bitrate_margin), 1)
-            cmd = build_writer_cmd_file(opath, w, h, fps_str, probe, target_k, preset=preset)
+            cmd = build_writer_cmd_file(opath, w, h, fps_str, probe, target_k,
+                                        preset=preset, src_path=ipath)
         else:
             cmd = build_writer_cmd_cam(opath, w, h, fps, preset=preset)
         writer_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -484,7 +493,7 @@ def video_detect(
             new_target = max(int(target_k * ratio * 1.20), int(src_k * 1.50))
             print(f'  [bitrate retry] actual {actual_k}k < src {src_k}k, '
                   f're-encoding @ {new_target}k')
-            rc = re_encode_bitrate(opath, probe, new_target, preset=preset)
+            rc = re_encode_bitrate(opath, probe, new_target, preset=preset, src_path=ipath)
             if rc != 0:
                 print(f'  [bitrate retry] re-encode failed (rc={rc})')
             else:
