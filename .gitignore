@@ -4,7 +4,6 @@ __pycache__/
 *.pyo
 
 # Output videos
-*_compress.*
 *_anonymized.*
 
 # Input data
