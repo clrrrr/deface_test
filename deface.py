@@ -29,6 +29,221 @@ __version__ = '1.5.0-local'
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 
+def _find_ffprobe():
+    """Locate ffprobe binary. Try alongside imageio_ffmpeg's ffmpeg, then PATH."""
+    import shutil
+    cand = os.path.join(os.path.dirname(FFMPEG), 'ffprobe')
+    for c in (cand, cand + '.exe'):
+        if os.path.isfile(c):
+            return c
+    return shutil.which('ffprobe')
+
+
+FFPROBE = _find_ffprobe()
+
+# codec_name from ffprobe -> ffmpeg encoder (CPU)
+CODEC_TO_ENCODER = {
+    'h264':       'libx264',
+    'hevc':       'libx265',
+    'h265':       'libx265',
+    'vp9':        'libvpx-vp9',
+    'vp8':        'libvpx',
+    'av1':        'libaom-av1',
+    'mpeg4':      'mpeg4',
+    'mpeg2video': 'mpeg2video',
+}
+
+
+def _clamp_8bit_pix_fmt(pf):
+    """Drop bit-depth suffix from pix_fmt since we encode from rgb24 (8-bit)."""
+    if not pf:
+        return 'yuv420p'
+    for suf in ('10le', '10be', '12le', '12be', '14le', '14be', '16le', '16be'):
+        if pf.endswith(suf):
+            return pf[:-len(suf)]
+    return pf
+
+
+def probe_video(path):
+    """Probe video parameters via ffprobe (preferred) or ffmpeg stderr fallback.
+    Returns dict with keys: width, height, fps, fps_str, nframes, duration,
+    codec, pix_fmt, bitrate_k, color_space, color_primaries, color_transfer, color_range.
+    """
+    info = {'width': 0, 'height': 0, 'fps': 0.0, 'fps_str': '0',
+            'nframes': 0, 'duration': 0.0, 'codec': 'h264',
+            'pix_fmt': 'yuv420p', 'bitrate_k': 0,
+            'color_space': None, 'color_primaries': None,
+            'color_transfer': None, 'color_range': None}
+    size_bytes = os.path.getsize(path) if os.path.isfile(path) else 0
+
+    if FFPROBE:
+        try:
+            r = subprocess.run(
+                [FFPROBE, '-v', 'error', '-print_format', 'json',
+                 '-show_format', '-show_streams', '-select_streams', 'v:0', path],
+                capture_output=True, text=True, timeout=30)
+            data = json.loads(r.stdout)
+            streams = data.get('streams', [])
+            if not streams:
+                return None
+            s = streams[0]
+            fmt = data.get('format', {})
+            info['width']  = int(s.get('width') or 0)
+            info['height'] = int(s.get('height') or 0)
+            info['codec']  = s.get('codec_name') or info['codec']
+            info['pix_fmt'] = s.get('pix_fmt') or info['pix_fmt']
+            info['color_space']     = s.get('color_space') or None
+            info['color_primaries'] = s.get('color_primaries') or None
+            info['color_transfer']  = s.get('color_transfer') or None
+            info['color_range']     = s.get('color_range') or None
+
+            fps_str = s.get('r_frame_rate') or s.get('avg_frame_rate') or '0/1'
+            info['fps_str'] = fps_str
+            try:
+                num, den = fps_str.split('/')
+                info['fps'] = float(num) / float(den) if float(den) else 0.0
+            except Exception:
+                info['fps'] = float(fps_str or 0)
+
+            info['duration'] = float(s.get('duration') or fmt.get('duration') or 0)
+            nb = s.get('nb_frames') or fmt.get('nb_frames')
+            if nb:
+                info['nframes'] = int(nb)
+            elif info['fps'] > 0 and info['duration'] > 0:
+                info['nframes'] = int(round(info['fps'] * info['duration']))
+
+            # Video bitrate: stream first, else format, else filesize estimate
+            br = s.get('bit_rate') or fmt.get('bit_rate')
+            if br:
+                info['bitrate_k'] = int(int(br) / 1000)
+            elif info['duration'] > 0 and size_bytes > 0:
+                info['bitrate_k'] = int(size_bytes * 8 / info['duration'] / 1000)
+            return info
+        except Exception as e:
+            print(f'  [probe] ffprobe failed: {e}, falling back to cv2')
+
+    # Fallback: cv2 + filesize (loses color metadata)
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return None
+    info['width']    = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    info['height']   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    info['fps']      = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    info['fps_str']  = f'{info["fps"]}'
+    info['nframes']  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    info['duration'] = info['nframes'] / info['fps'] if info['fps'] > 0 else 0.0
+    cap.release()
+    if info['duration'] > 0 and size_bytes > 0:
+        info['bitrate_k'] = int(size_bytes * 8 / info['duration'] / 1000)
+    return info
+
+
+def build_encoder_args(probe, target_k):
+    """Build ffmpeg encoder argument list (no input/output, no -an)."""
+    encoder = CODEC_TO_ENCODER.get(probe['codec'], 'libx264')
+    pix_fmt = _clamp_8bit_pix_fmt(probe.get('pix_fmt'))
+    bufk = max(target_k * 2, 1)
+    args = [
+        '-c:v', encoder,
+        '-pix_fmt', pix_fmt,
+        '-b:v', f'{target_k}k',
+        '-minrate', f'{target_k}k',
+        '-maxrate', f'{target_k}k',
+        '-bufsize', f'{bufk}k',
+        '-threads', '0',
+    ]
+    if encoder == 'libx264':
+        args += ['-x264-params', 'nal-hrd=cbr']
+    elif encoder == 'libx265':
+        args += ['-x265-params',
+                 f'vbv-maxrate={target_k}:vbv-minrate={target_k}:vbv-bufsize={bufk}:strict-cbr=1']
+    elif encoder == 'libaom-av1':
+        args += ['-aom-params', 'end-usage=cbr']
+    # Color metadata passthrough
+    for src_key, dst_flag in (('color_space', '-colorspace'),
+                              ('color_primaries', '-color_primaries'),
+                              ('color_transfer', '-color_trc'),
+                              ('color_range', '-color_range')):
+        v = probe.get(src_key)
+        if v and v not in ('unknown', 'reserved', 'N/A'):
+            args += [dst_flag, v]
+    return args
+
+
+def build_writer_cmd_file(opath, w, h, fps_str, probe, target_k, preset=None):
+    """ffmpeg cmd: raw rgb24 stdin -> encoded file (passthrough source params)."""
+    cmd = [FFMPEG, '-y', '-hide_banner', '-loglevel', 'error',
+           '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{w}x{h}', '-r', fps_str,
+           '-i', 'pipe:0', '-an']
+    cmd += build_encoder_args(probe, target_k)
+    encoder = CODEC_TO_ENCODER.get(probe['codec'], 'libx264')
+    if preset and encoder in ('libx264', 'libx265', 'libvpx-vp9'):
+        cmd += ['-preset', preset]
+    cmd += [opath]
+    return cmd
+
+
+def build_writer_cmd_cam(opath, w, h, fps, preset=None):
+    """Cam fallback: no source to passthrough, use libx264/CRF defaults."""
+    cmd = [FFMPEG, '-y', '-hide_banner', '-loglevel', 'error',
+           '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{w}x{h}', '-r', str(fps),
+           '-i', 'pipe:0', '-an',
+           '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18']
+    if preset:
+        cmd += ['-preset', preset]
+    cmd += [opath]
+    return cmd
+
+
+def measure_bitrate_k(path):
+    """Return file's video bitrate in kbps (via ffprobe if available, else filesize/duration)."""
+    if FFPROBE:
+        try:
+            r = subprocess.run(
+                [FFPROBE, '-v', 'error', '-print_format', 'json',
+                 '-show_format', '-show_streams', '-select_streams', 'v:0', path],
+                capture_output=True, text=True, timeout=30)
+            data = json.loads(r.stdout)
+            s = (data.get('streams') or [{}])[0]
+            fmt = data.get('format', {})
+            br = s.get('bit_rate') or fmt.get('bit_rate')
+            if br:
+                return int(int(br) / 1000)
+            dur = float(s.get('duration') or fmt.get('duration') or 0)
+            sz = os.path.getsize(path) if os.path.isfile(path) else 0
+            if dur > 0 and sz > 0:
+                return int(sz * 8 / dur / 1000)
+        except Exception:
+            pass
+    # Fallback
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return 0
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0
+    nframes = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    dur = nframes / fps if fps > 0 else 0
+    sz = os.path.getsize(path) if os.path.isfile(path) else 0
+    return int(sz * 8 / dur / 1000) if dur > 0 and sz > 0 else 0
+
+
+def re_encode_bitrate(opath, probe, target_k, preset=None):
+    """Re-encode opath in-place with higher bitrate target. Used when first pass undershoots."""
+    tmp = opath + '.tmp_rebr' + os.path.splitext(opath)[1]
+    cmd = [FFMPEG, '-y', '-hide_banner', '-loglevel', 'error', '-i', opath, '-an']
+    cmd += build_encoder_args(probe, target_k)
+    encoder = CODEC_TO_ENCODER.get(probe['codec'], 'libx264')
+    if preset and encoder in ('libx264', 'libx265', 'libvpx-vp9'):
+        cmd += ['-preset', preset]
+    cmd += [tmp]
+    rc = subprocess.run(cmd, capture_output=True).returncode
+    if rc == 0:
+        os.replace(tmp, opath)
+    elif os.path.exists(tmp):
+        os.remove(tmp)
+    return rc
+
+
 def scale_bb(x1, y1, x2, y2, mask_scale=1.0):
     s = mask_scale - 1.0
     h, w = y2 - y1, x2 - x1
@@ -125,15 +340,15 @@ def video_detect(
         mask_scale: float,
         ellipse: bool,
         draw_scores: bool,
-        ffmpeg_config: Dict[str, str],
         replaceimg = None,
-        keep_audio: bool = False,
         mosaicsize: int = 20,
         batchsize: int = 8,
         prefetch: int = 2,
         preset: str = None,
+        bitrate_margin: float = 1.30,
 ):
     cam_reader = None
+    probe = None
     if cam:
         try:
             cam_reader = imageio.get_reader(ipath)
@@ -141,39 +356,37 @@ def video_detect(
             fps = meta['fps']
             w, h = meta['size']
             nframes = None
+            fps_str = str(fps)
         except:
             print(f'Could not find video device {ipath}. Please set a valid input.')
             return
     else:
-        cap = cv2.VideoCapture(ipath)
-        if not cap.isOpened():
-            print(f'Could not open file {ipath} as a video file. Skipping file...')
+        probe = probe_video(ipath)
+        if probe is None or probe['width'] == 0:
+            print(f'Could not probe {ipath} as a video file. Skipping file...')
             return
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        nframes = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = nframes / fps if fps > 0 else 0
-        src_bitrate = int(os.path.getsize(ipath) * 8 / duration / 1000) if duration > 0 else 0
-        cap.release()
+        w, h = probe['width'], probe['height']
+        fps = probe['fps']
+        fps_str = probe['fps_str']
+        nframes = probe['nframes']
+        print(f'  [probe] {probe["codec"]} {w}x{h} {fps:.3f}fps {probe["pix_fmt"]} '
+              f'{probe["bitrate_k"]}kbps  color=({probe["color_space"]}/{probe["color_primaries"]}/'
+              f'{probe["color_transfer"]}/{probe["color_range"]})')
 
     if nested:
         bar = tqdm.tqdm(dynamic_ncols=True, total=nframes, position=1, leave=True)
     else:
         bar = tqdm.tqdm(dynamic_ncols=True, total=nframes)
 
+    writer_proc = None
+    target_k = 0
     if opath is not None:
-        _ffmpeg_config = ffmpeg_config.copy()
-        _ffmpeg_config.setdefault('fps', fps)
-        if not cam:
-            _ffmpeg_config.setdefault('bitrate', f'{src_bitrate}k')
-        if keep_audio:
-            _ffmpeg_config.setdefault('audio_path', ipath)
-            _ffmpeg_config.setdefault('audio_codec', 'copy')
-        codec = _ffmpeg_config.get('codec', 'libx264')
-        if preset is not None and codec in ('libx264', 'libx265', 'libvpx-vp9'):
-            _ffmpeg_config['output_params'] = ['-preset', preset]
-        writer = imageio.get_writer(opath, format='FFMPEG', mode='I', **_ffmpeg_config)
+        if probe is not None:
+            target_k = max(int(probe['bitrate_k'] * bitrate_margin), 1)
+            cmd = build_writer_cmd_file(opath, w, h, fps_str, probe, target_k, preset=preset)
+        else:
+            cmd = build_writer_cmd_cam(opath, w, h, fps, preset=preset)
+        writer_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     BATCH_SIZE = batchsize
     total_frames = 0
@@ -220,8 +433,11 @@ def video_detect(
                 anonymize_frame(dets, f, mask_scale=mask_scale,
                     replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
                     replaceimg=replaceimg, mosaicsize=mosaicsize)
-                if opath is not None:
-                    writer.append_data(f)
+                if writer_proc is not None:
+                    try:
+                        writer_proc.stdin.write(f.tobytes())
+                    except BrokenPipeError:
+                        return
                 if enable_preview:
                     cv2.imshow('Preview of anonymization results (quit by pressing Q or Escape)', f[:, :, ::-1])
                     if cv2.waitKey(1) & 0xFF in [ord('q'), 27]:
@@ -250,9 +466,32 @@ def video_detect(
     writer_t.join()
     if cam_reader is not None:
         cam_reader.close()
-    if opath is not None:
-        writer.close()
+    if writer_proc is not None:
+        try:
+            writer_proc.stdin.close()
+        except Exception:
+            pass
+        writer_proc.wait()
     bar.close()
+
+    # Strict bitrate guarantee: re-encode if first pass undershot the source
+    if probe is not None and opath is not None and writer_proc is not None \
+            and writer_proc.returncode == 0 and probe['bitrate_k'] > 0:
+        actual_k = measure_bitrate_k(opath)
+        src_k = probe['bitrate_k']
+        if 0 < actual_k < src_k:
+            ratio = src_k / actual_k
+            new_target = max(int(target_k * ratio * 1.20), int(src_k * 1.50))
+            print(f'  [bitrate retry] actual {actual_k}k < src {src_k}k, '
+                  f're-encoding @ {new_target}k')
+            rc = re_encode_bitrate(opath, probe, new_target, preset=preset)
+            if rc != 0:
+                print(f'  [bitrate retry] re-encode failed (rc={rc})')
+            else:
+                final_k = measure_bitrate_k(opath)
+                if final_k < src_k:
+                    print(f'  [WARN] post-retry bitrate {final_k}k still < src {src_k}k')
+
     return total_frames, face_frames
 
 
@@ -376,12 +615,8 @@ def parse_cli_args():
         '--mosaicsize', default=20, type=int, metavar='width',
         help='Setting the mosaic size. Requires --replacewith mosaic option. Default: 20.')
     parser.add_argument(
-        '--keep-audio', '-k', default=False, action='store_true',
-        help='Keep audio from video source file and copy it over to the output (only applies to videos).')
-    parser.add_argument(
-        '--ffmpeg-config', default={"codec": "libx264"}, type=json.loads,
-        help='FFMPEG config arguments for encoding output videos. This argument is expected in JSON notation. For a list of possible options, refer to the ffmpeg-imageio docs. Default: \'{"codec": "libx264"}\'.'
-    )  # See https://imageio.readthedocs.io/en/stable/format_ffmpeg.html#parameters-for-saving
+        '--bitrate-margin', default=1.30, type=float, metavar='M',
+        help='Output bitrate target = source_bitrate * M. Output is guaranteed >= source via CBR + retry. Default: 1.30.')
     parser.add_argument(
         '--backend', default='auto', choices=['auto', 'onnxrt', 'opencv'],
         help='Backend for ONNX model execution. Default: "auto" (prefer onnxrt if available).')
@@ -441,8 +676,6 @@ def main():
     threshold = args.thresh
     ellipse = not args.boxes
     mask_scale = args.mask_scale
-    keep_audio = args.keep_audio
-    ffmpeg_config = args.ffmpeg_config
     backend = args.backend
     in_shape = args.scale
     execution_provider = args.execution_provider
@@ -491,13 +724,12 @@ def main():
                 draw_scores=draw_scores,
                 enable_preview=enable_preview,
                 nested=multi_file,
-                keep_audio=keep_audio,
-                ffmpeg_config=ffmpeg_config,
                 replaceimg=replaceimg,
                 mosaicsize=mosaicsize,
                 batchsize=args.batchsize,
                 prefetch=args.prefetch,
-                preset=args.preset
+                preset=args.preset,
+                bitrate_margin=args.bitrate_margin,
             )
             if result is not None and not is_cam:
                 total_frames, face_frames = result
