@@ -1,0 +1,11 @@
+# Core dependencies (required)
+numpy>=1.22,<3
+opencv-python>=4.5
+imageio>=2.30
+imageio-ffmpeg>=0.4
+tqdm>=4.60
+scikit-image>=0.19
+
+# ONNX runtime backend (required). Falls back to OpenCV DNN if missing.
+onnx>=1.14
+onnxruntime-gpu==1.16.3
