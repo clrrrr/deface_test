@@ -1,4 +1,5 @@
 import os
+import time
 
 from functools import lru_cache
 
@@ -20,7 +21,7 @@ def ensure_rgb(img: np.ndarray) -> np.ndarray:
 
 
 class CenterFace:
-    def __init__(self, onnx_path=None, in_shape=None, backend='auto', override_execution_provider=None):
+    def __init__(self, onnx_path=None, in_shape=None, backend='auto', override_execution_provider=None, gpu_id=0):
         self.in_shape = in_shape
         self.onnx_input_name = 'input.1'
         self.onnx_output_names = ['537', '538', '539', '540']
@@ -65,7 +66,24 @@ class CenterFace:
                     raise ValueError(f'{override_execution_provider=} not found. Available providers are: {available_providers}')
                 ort_providers = [override_execution_provider]
 
-            self.sess = onnxruntime.InferenceSession(dyn_model.SerializeToString(), providers=ort_providers)
+            sess_options = onnxruntime.SessionOptions()
+            sess_options.enable_profiling = False  # Disabled for performance
+
+            # Configure CUDA provider with device_id
+            if 'CUDAExecutionProvider' in ort_providers:
+                cuda_provider_options = {'device_id': gpu_id}
+                providers_with_options = [
+                    ('CUDAExecutionProvider', cuda_provider_options),
+                    'CPUExecutionProvider'
+                ]
+            else:
+                providers_with_options = ort_providers
+
+            self.sess = onnxruntime.InferenceSession(
+                dyn_model.SerializeToString(),
+                sess_options=sess_options,
+                providers=providers_with_options
+            )
 
             preferred_provider = self.sess.get_providers()[0]
             print(f'Running on {preferred_provider}.')
@@ -94,19 +112,41 @@ class CenterFace:
         return dyn_model
 
     def batch_call(self, imgs, threshold=0.5):
+        t_start = time.time()
+
         imgs = [ensure_rgb(img) for img in imgs]
+        t_rgb = time.time() - t_start
+
         orig_shape = imgs[0].shape[:2]
         in_shape = orig_shape[::-1] if self.in_shape is None else self.in_shape
-        w_new, h_new, scale_w, scale_h = self.shape_transform(in_shape, orig_shape)
 
-        blobs = [cv2.dnn.blobFromImage(img, scalefactor=1.0, size=(w_new, h_new),
-                 mean=(0, 0, 0), swapRB=False, crop=False) for img in imgs]
+        # Check if resize needed
+        if (orig_shape[1], orig_shape[0]) == in_shape:
+            w_new, h_new = in_shape
+            scale_w = scale_h = 1.0
+        else:
+            w_new, h_new, scale_w, scale_h = self.shape_transform(in_shape, orig_shape)
+
+        t0 = time.time()
+        if scale_w == 1.0 and scale_h == 1.0:
+            # No resize needed
+            blobs = [cv2.dnn.blobFromImage(img, scalefactor=1.0, size=(w_new, h_new),
+                     mean=(0, 0, 0), swapRB=False, crop=False) for img in imgs]
+        else:
+            # Fast CPU resize with INTER_AREA (optimized for downscaling)
+            resized = [cv2.resize(img, (w_new, h_new), interpolation=cv2.INTER_AREA) for img in imgs]
+            blobs = [cv2.dnn.blobFromImage(img, scalefactor=1.0, size=(w_new, h_new),
+                     mean=(0, 0, 0), swapRB=False, crop=False) for img in resized]
         batch_blob = np.concatenate(blobs, axis=0)
+        t_prep = time.time() - t0
 
+        t1 = time.time()
         heatmaps, scales, offsets, lms_batch = self.sess.run(
             self.onnx_output_names, {self.onnx_input_name: batch_blob}
         )
+        t_infer = time.time() - t1
 
+        t2 = time.time()
         results = []
         for b in range(len(imgs)):
             dets, lms = self.decode(
@@ -122,6 +162,17 @@ class CenterFace:
                 dets = np.empty(shape=[0, 5], dtype=np.float32)
                 lms = np.empty(shape=[0, 10], dtype=np.float32)
             results.append((dets, lms))
+        t_decode = time.time() - t2
+
+        t_total = time.time() - t_start
+        if not hasattr(self, '_timing_stats'):
+            self._timing_stats = {'rgb': 0, 'prep': 0, 'infer': 0, 'decode': 0, 'count': 0}
+        self._timing_stats['rgb'] += t_rgb
+        self._timing_stats['prep'] += t_prep
+        self._timing_stats['infer'] += t_infer
+        self._timing_stats['decode'] += t_decode
+        self._timing_stats['count'] += 1
+
         return results
 
     def __call__(self, img, threshold=0.5):

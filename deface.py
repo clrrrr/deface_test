@@ -442,6 +442,9 @@ def video_detect(
         bitrate_margin: float = 1.30,
         profile: Profile = None,
         encoder: str = 'auto',
+        prep_workers: int = 6,
+        prep_threads: int = 2,
+        infer_threads: int = 4,
 ):
     if profile is None:
         profile = Profile(enabled=False)
@@ -499,10 +502,55 @@ def video_detect(
     BATCH_SIZE = batchsize
     total_frames = 0
     face_frames = 0
-    raw_queue = queue.Queue(maxsize=prefetch)
-    result_queue = queue.Queue(maxsize=prefetch)
+    raw_queue = queue.Queue(maxsize=prefetch * 2)
+    prep_queue = queue.Queue(maxsize=prefetch * 2)  # New: queue for prepped frames
+    det_queue = queue.Queue(maxsize=prefetch * 2)
+    processed_queue = queue.Queue(maxsize=prefetch)
 
-    profile.start_sampling(raw_queue, result_queue)
+    # Performance tracking
+    start_time = time.time()
+    last_report_time = start_time
+    last_report_frames = 0
+    inference_time = 0.0
+    processing_time = 0.0
+
+    # Create second centerface for GPU1
+    try:
+        centerface_gpu1 = CenterFace(in_shape=centerface.in_shape, backend=centerface.backend, gpu_id=1)
+        use_dual_gpu = True
+        print('  [dual-gpu] Enabled - using GPU0 and GPU1')
+    except Exception as e:
+        centerface_gpu1 = None
+        use_dual_gpu = False
+        print(f'  [dual-gpu] Failed to initialize GPU1: {e}, using single GPU')
+
+    profile.start_sampling(raw_queue, processed_queue)
+
+    def _prep_worker(worker_id):
+        """Resize frames - use faster algorithm and parallel within batch"""
+        import concurrent.futures
+        in_shape = centerface.in_shape
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=prep_threads) as executor:
+            while True:
+                buf = raw_queue.get()
+                if buf is None:
+                    raw_queue.put(None)
+                    break
+
+                if in_shape is None:
+                    prep_queue.put([(f, f) for f in buf])
+                else:
+                    orig_shape = buf[0].shape[:2]
+                    w_new, h_new, scale_w, scale_h = centerface.shape_transform(in_shape, orig_shape)
+
+                    def resize_frame(f):
+                        # Use INTER_LINEAR (faster than INTER_AREA)
+                        resized = cv2.resize(f, (w_new, h_new), interpolation=cv2.INTER_LINEAR)
+                        return (f, resized, scale_w, scale_h)
+
+                    prepped = list(executor.map(resize_frame, buf))
+                    prep_queue.put(prepped)
 
     def _reader():
         if cam:
@@ -515,10 +563,12 @@ def video_detect(
             if buf:
                 raw_queue.put(buf)
         else:
+            # Decode at original resolution, resize happens in batch_call
             cmd = [FFMPEG, '-hwaccel', 'auto', '-threads', '0', '-i', ipath,
                    '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             frame_bytes = w * h * 3
+
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             buf = []
             while True:
                 raw = proc.stdout.read(frame_bytes)
@@ -534,15 +584,29 @@ def video_detect(
             proc.wait()
         raw_queue.put(None)
 
-    def _writer():
+    def _processor():
         while True:
-            item = result_queue.get()
+            item = det_queue.get()
+            if item is None:
+                processed_queue.put(None)
+                break
+            processed = []
+            for f, dets in item:
+                # Only anonymize if faces detected (optimization for no-face frames)
+                if len(dets) > 0:
+                    anonymize_frame(dets, f, mask_scale=mask_scale,
+                        replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
+                        replaceimg=replaceimg, mosaicsize=mosaicsize)
+                processed.append(f)
+            processed_queue.put(processed)
+
+    def _writer():
+        nonlocal total_frames, last_report_time, last_report_frames
+        while True:
+            item = processed_queue.get()
             if item is None:
                 break
-            for f, dets in item:
-                anonymize_frame(dets, f, mask_scale=mask_scale,
-                    replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
-                    replaceimg=replaceimg, mosaicsize=mosaicsize)
+            for f in item:
                 if writer_proc is not None:
                     try:
                         writer_proc.stdin.write(f.tobytes())
@@ -554,26 +618,162 @@ def video_detect(
                         cv2.destroyAllWindows()
                         return
                 bar.update()
+                total_frames += 1
+                # Speed reporting every 10 seconds
+                now = time.time()
+                if now - last_report_time >= 10:
+                    elapsed = now - start_time
+                    fps = total_frames / elapsed if elapsed > 0 else 0
+                    recent_fps = (total_frames - last_report_frames) / (now - last_report_time)
 
+                    # Get detailed timing from centerface
+                    cf_stats = getattr(centerface, '_timing_stats', None)
+                    queue_get_t = getattr(centerface, '_queue_get_time', 0)
+                    queue_put_t = getattr(centerface, '_queue_put_time', 0)
+
+                    if cf_stats and cf_stats['count'] > 0:
+                        rgb_pct = cf_stats['rgb'] / elapsed * 100
+                        prep_pct = cf_stats['prep'] / elapsed * 100
+                        infer_pct = cf_stats['infer'] / elapsed * 100
+                        decode_pct = cf_stats['decode'] / elapsed * 100
+                        proc_pct = processing_time / elapsed * 100
+                        qget_pct = queue_get_t / elapsed * 100
+                        qput_pct = queue_put_t / elapsed * 100
+                        other_pct = 100 - (rgb_pct + prep_pct + infer_pct + decode_pct + proc_pct + qget_pct + qput_pct)
+
+                        print(f'  [speed] {fps:.2f} fps avg, {recent_fps:.2f} fps recent, '
+                              f'{total_frames}/{nframes or "?"} frames, '
+                              f'queues: raw={raw_queue.qsize()} det={det_queue.qsize()} proc={processed_queue.qsize()}')
+                        print(f'  [detail] prep={prep_pct:.1f}% infer={infer_pct:.1f}% decode={decode_pct:.1f}% '
+                              f'proc={proc_pct:.1f}% qget={qget_pct:.1f}% qput={qput_pct:.1f}% other={other_pct:.1f}%')
+                    else:
+                        inf_pct = inference_time / elapsed * 100 if elapsed > 0 else 0
+                        proc_pct = processing_time / elapsed * 100 if elapsed > 0 else 0
+                        print(f'  [speed] {fps:.2f} fps avg, {recent_fps:.2f} fps recent, '
+                              f'{total_frames}/{nframes or "?"} frames, '
+                              f'queues: raw={raw_queue.qsize()} det={det_queue.qsize()} proc={processed_queue.qsize()}, '
+                              f'time: inference={inf_pct:.1f}% processing={proc_pct:.1f}%')
+                    last_report_time = now
+                    last_report_frames = total_frames
+
+    # Start threads
     threading.Thread(target=_reader, daemon=True).start()
+
+    # Start multiple prep workers for true batch-level parallelism
+    for i in range(prep_workers):
+        threading.Thread(target=lambda wid=i: _prep_worker(wid), daemon=True).start()
+
+    processor_t = threading.Thread(target=_processor, daemon=True)
+    processor_t.start()
     writer_t = threading.Thread(target=_writer, daemon=True)
     writer_t.start()
 
-    with profile.timer('encode_wall'):
-        while True:
-            buf = raw_queue.get()
-            if buf is None:
-                result_queue.put(None)
-                break
-            batch_results = centerface.batch_call(buf, threshold=threshold)
-            pairs = []
-            for f, (dets, _) in zip(buf, batch_results):
-                total_frames += 1
-                if len(dets) > 0:
-                    face_frames += 1
-                pairs.append((f, dets))
-            result_queue.put(pairs)
+    # Inference threads for dual-GPU
+    def _inference_worker(cf, gpu_id):
+        import concurrent.futures
+        nonlocal total_frames, face_frames, inference_time, processing_time
 
+        with concurrent.futures.ThreadPoolExecutor(max_workers=infer_threads) as executor:
+            while True:
+                t_get = time.time()
+                item = prep_queue.get()
+                queue_get_time = time.time() - t_get
+
+                if item is None:
+                    det_queue.put(None)
+                    break
+
+                # item is list of (original_frame, resized_frame, scale_w, scale_h) or (frame, frame) if no resize
+                t0 = time.time()
+                if centerface.in_shape is None:
+                    # No resize case: item is [(frame, frame), ...]
+                    frames = [pair[0] for pair in item]
+                    batch_results = cf.batch_call(frames, threshold=threshold)
+                else:
+                    # Resized case: use pre-resized frames for inference
+                    resized_frames = [pair[1] for pair in item]
+                    # Parallel blob creation
+                    t1 = time.time()
+
+                    def make_blob(img):
+                        return cv2.dnn.blobFromImage(img, scalefactor=1.0, size=(img.shape[1], img.shape[0]),
+                                 mean=(0, 0, 0), swapRB=False, crop=False)
+
+                    blobs = list(executor.map(make_blob, resized_frames))
+                    batch_blob = np.concatenate(blobs, axis=0)
+
+                    heatmaps, scales, offsets, lms_batch = cf.sess.run(
+                        cf.onnx_output_names, {cf.onnx_input_name: batch_blob}
+                    )
+                    t_infer = time.time() - t1
+
+                    # Parallel decode results
+                    t2 = time.time()
+
+                    def decode_frame(b):
+                        scale_w, scale_h = item[b][2], item[b][3]
+                        h_new, w_new = resized_frames[b].shape[:2]
+                        dets, lms = cf.decode(
+                            heatmaps[b:b+1], scales[b:b+1], offsets[b:b+1], lms_batch[b:b+1],
+                            (h_new, w_new), threshold=threshold
+                        )
+                        if len(dets) > 0:
+                            dets[:, 0:4:2] /= scale_w
+                            dets[:, 1:4:2] /= scale_h
+                            lms[:, 0:10:2] /= scale_w
+                            lms[:, 1:10:2] /= scale_h
+                        else:
+                            dets = np.empty(shape=[0, 5], dtype=np.float32)
+                            lms = np.empty(shape=[0, 10], dtype=np.float32)
+                        return (dets, lms)
+
+                    batch_results = list(executor.map(decode_frame, range(len(resized_frames))))
+
+                    # Update timing stats
+                    if not hasattr(cf, '_timing_stats'):
+                        cf._timing_stats = {'rgb': 0, 'prep': 0, 'infer': 0, 'decode': 0, 'count': 0}
+                    cf._timing_stats['prep'] += 0  # Prep done in separate thread
+                    cf._timing_stats['infer'] += t_infer
+                    cf._timing_stats['decode'] += time.time() - t2
+                    cf._timing_stats['count'] += 1
+
+                inference_time += time.time() - t0
+
+                t1 = time.time()
+                pairs = []
+                for i, (dets, _) in enumerate(batch_results):
+                    original_frame = item[i][0]
+                    total_frames += 1
+                    if len(dets) > 0:
+                        face_frames += 1
+                    pairs.append((original_frame, dets))
+                processing_time += time.time() - t1
+
+                t_put = time.time()
+                det_queue.put(pairs)
+                queue_put_time = time.time() - t_put
+
+                if not hasattr(cf, '_queue_get_time'):
+                    cf._queue_get_time = 0
+                    cf._queue_put_time = 0
+                cf._queue_get_time += queue_get_time
+                cf._queue_put_time += queue_put_time
+
+    # TODO: Create second centerface and launch dual inference threads
+    with profile.timer('encode_wall'):
+        if use_dual_gpu:
+            # Launch two inference threads
+            inf_t1 = threading.Thread(target=lambda: _inference_worker(centerface, 0), daemon=True)
+            inf_t2 = threading.Thread(target=lambda: _inference_worker(centerface_gpu1, 1), daemon=True)
+            inf_t1.start()
+            inf_t2.start()
+            inf_t1.join()
+            inf_t2.join()
+        else:
+            # Single GPU fallback
+            _inference_worker(centerface, 0)
+
+        processor_t.join()
         writer_t.join()
         if cam_reader is not None:
             cam_reader.close()
@@ -605,7 +805,14 @@ def video_detect(
                         print(f'  [WARN] post-retry bitrate {final_k}k still < src {src_k}k')
 
     profile.stop_sampling()
-    profile.report(prefetch, prefetch)
+
+    # Final performance report
+    total_time = time.time() - start_time
+    if total_frames > 0:
+        avg_fps = total_frames / total_time
+        print(f'  [final] {total_frames} frames in {total_time:.1f}s = {avg_fps:.2f} fps')
+
+    profile.report(prefetch * 2, prefetch)
 
     return total_frames, face_frames
 
@@ -754,6 +961,12 @@ def parse_cli_args():
         help='Batch size for face detection inference (default: 8)')
     parser.add_argument('--prefetch', type=int, default=2, metavar='N',
         help='Queue depth for frame prefetch (default: 2)')
+    parser.add_argument('--prep-workers', type=int, default=6, metavar='N',
+        help='Number of parallel prep workers for resize (default: 6)')
+    parser.add_argument('--prep-threads', type=int, default=2, metavar='N',
+        help='Threads per prep worker for parallel resize (default: 2)')
+    parser.add_argument('--infer-threads', type=int, default=4, metavar='N',
+        help='Threads per inference worker for parallel blob/decode (default: 4)')
     parser.add_argument('--profile', default=False, action='store_true',
         help='Enable performance profiling (timing, resource monitoring, bottleneck diagnosis)')
     parser.add_argument('--encoder', default='auto',
@@ -854,6 +1067,9 @@ def main():
                 bitrate_margin=args.bitrate_margin,
                 profile=prof,
                 encoder=args.encoder,
+                prep_workers=args.prep_workers,
+                prep_threads=args.prep_threads,
+                infer_threads=args.infer_threads,
             )
             if result is not None and not is_cam:
                 total_frames, face_frames = result
