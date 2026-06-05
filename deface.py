@@ -507,6 +507,11 @@ def video_detect(
     det_queue = queue.Queue(maxsize=prefetch * 2)
     processed_queue = queue.Queue(maxsize=prefetch)
 
+    # Pipeline shape: when no resize needed, skip prep stage entirely
+    # (prep workers are pure pass-through when in_shape=None, adding queue overhead for nothing)
+    prep_needed = (centerface.in_shape is not None)
+    inference_q = prep_queue if prep_needed else raw_queue
+
     # Performance tracking
     start_time = time.time()
     last_report_time = start_time
@@ -543,7 +548,8 @@ def video_detect(
             while True:
                 buf = raw_queue.get()
                 if buf is None:
-                    raw_queue.put(None)
+                    raw_queue.put(None)   # propagate to sibling prep workers
+                    prep_queue.put(None)  # propagate downstream to inference workers
                     break
 
                 if in_shape is None:
@@ -666,9 +672,13 @@ def video_detect(
     # Start threads
     threading.Thread(target=_reader, daemon=True).start()
 
-    # Start multiple prep workers for true batch-level parallelism
-    for i in range(prep_workers):
-        threading.Thread(target=lambda wid=i: _prep_worker(wid), daemon=True).start()
+    # Start prep workers only when resize is actually needed
+    if prep_needed:
+        for i in range(prep_workers):
+            threading.Thread(target=lambda wid=i: _prep_worker(wid), daemon=True).start()
+        print(f'  [prep] {prep_workers} workers (in_shape={centerface.in_shape})')
+    else:
+        print(f'  [prep] bypassed (in_shape=None, inference reads raw_queue directly)')
 
     processor_t = threading.Thread(target=_processor, daemon=True)
     processor_t.start()
@@ -683,17 +693,21 @@ def video_detect(
         with concurrent.futures.ThreadPoolExecutor(max_workers=infer_threads) as executor:
             while True:
                 t_get = time.time()
-                item = prep_queue.get()
+                item = inference_q.get()
                 queue_get_time = time.time() - t_get
 
                 if item is None:
+                    inference_q.put(None)  # propagate to sibling inference workers
                     det_queue.put(None)
                     break
 
-                # item is list of (original_frame, resized_frame, scale_w, scale_h) or (frame, frame) if no resize
                 t0 = time.time()
-                if centerface.in_shape is None:
-                    # No resize case: item is [(frame, frame), ...]
+                if not prep_needed:
+                    # Bypass: item is the raw buf (list of frames)
+                    frames = item
+                    batch_results = cf.batch_call(frames, threshold=threshold)
+                elif centerface.in_shape is None:
+                    # Defensive: shouldn't reach here when prep_needed is False, but keep parity
                     frames = [pair[0] for pair in item]
                     batch_results = cf.batch_call(frames, threshold=threshold)
                 else:
@@ -749,7 +763,7 @@ def video_detect(
                 t1 = time.time()
                 pairs = []
                 for i, (dets, _) in enumerate(batch_results):
-                    original_frame = item[i][0]
+                    original_frame = item[i] if not prep_needed else item[i][0]
                     total_frames += 1
                     if len(dets) > 0:
                         face_frames += 1
