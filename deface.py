@@ -24,6 +24,12 @@ import imageio_ffmpeg
 
 from centerface import CenterFace
 
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
 __version__ = '1.5.0-local'
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
@@ -52,6 +58,87 @@ CODEC_TO_ENCODER = {
     'mpeg4':      'mpeg4',
     'mpeg2video': 'mpeg2video',
 }
+
+VALID_ENCODERS = [
+    'libx264', 'libx265', 'libvpx-vp9', 'libvpx', 'libaom-av1',
+    'h264_nvenc', 'hevc_nvenc', 'h264_amf', 'hevc_amf', 'h264_qsv', 'hevc_qsv'
+]
+
+
+class Profile:
+    def __init__(self, enabled=False):
+        self.enabled = enabled
+        self.times = {}
+        self.resources = []
+        self.queue_samples = []
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start_sampling(self, raw_q, result_q):
+        if not self.enabled or not HAS_PSUTIL:
+            return
+        def _sample():
+            while not self._stop.is_set():
+                cpu = psutil.cpu_percent(interval=None)
+                ram = psutil.virtual_memory().percent
+                gpu_util = gpu_mem = 0
+                try:
+                    import pynvml
+                    pynvml.nvmlInit()
+                    h = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    u = pynvml.nvmlDeviceGetUtilizationRates(h)
+                    m = pynvml.nvmlDeviceGetMemoryInfo(h)
+                    gpu_util = u.gpu
+                    gpu_mem = m.used / m.total * 100
+                except:
+                    pass
+                self.resources.append((time.time(), cpu, ram, gpu_util, gpu_mem))
+                self.queue_samples.append((raw_q.qsize(), result_q.qsize()))
+                time.sleep(2)
+        self._thread = threading.Thread(target=_sample, daemon=True)
+        self._thread.start()
+
+    def stop_sampling(self):
+        if self._thread:
+            self._stop.set()
+            self._thread.join(timeout=1)
+
+    def timer(self, name):
+        class _Timer:
+            def __init__(self, prof, n):
+                self.prof = prof
+                self.name = n
+            def __enter__(self):
+                self.t0 = time.time()
+                return self
+            def __exit__(self, *args):
+                if self.prof.enabled:
+                    self.prof.times[self.name] = time.time() - self.t0
+        return _Timer(self, name)
+
+    def report(self, raw_maxsize, result_maxsize):
+        if not self.enabled:
+            return
+        print('\n=== Profile Report ===')
+        for k, v in self.times.items():
+            print(f'  {k}: {v:.2f}s')
+        if self.resources:
+            cpu = np.mean([r[1] for r in self.resources])
+            ram = np.mean([r[2] for r in self.resources])
+            gpu = np.mean([r[3] for r in self.resources])
+            gmem = np.mean([r[4] for r in self.resources])
+            print(f'  avg CPU: {cpu:.1f}%  RAM: {ram:.1f}%  GPU: {gpu:.1f}%  GMEM: {gmem:.1f}%')
+        if self.queue_samples:
+            raw_full = sum(1 for r, _ in self.queue_samples if r >= raw_maxsize) / len(self.queue_samples) * 100
+            result_full = sum(1 for _, res in self.queue_samples if res >= result_maxsize) / len(self.queue_samples) * 100
+            result_empty = sum(1 for _, res in self.queue_samples if res == 0) / len(self.queue_samples) * 100
+            print(f'  raw_queue full: {raw_full:.1f}%  result_queue full: {result_full:.1f}%  empty: {result_empty:.1f}%')
+            if result_full > 60:
+                print('  [Diagnosis] Encoder bottleneck (result_queue mostly full)')
+            elif result_empty > 60 and gpu < 50:
+                print('  [Diagnosis] Inference bottleneck (result_queue empty, low GPU)')
+            elif result_empty > 60 and raw_full < 20:
+                print('  [Diagnosis] I/O bottleneck (both queues empty)')
 
 
 def _clamp_8bit_pix_fmt(pf):
@@ -138,9 +225,8 @@ def probe_video(path):
     return info
 
 
-def build_encoder_args(probe, target_k):
+def build_encoder_args(encoder, probe, target_k):
     """Build ffmpeg encoder argument list (no input/output, no -an)."""
-    encoder = CODEC_TO_ENCODER.get(probe['codec'], 'libx264')
     pix_fmt = _clamp_8bit_pix_fmt(probe.get('pix_fmt'))
     bufk = max(target_k * 2, 1)
     args = [
@@ -152,7 +238,9 @@ def build_encoder_args(probe, target_k):
         '-bufsize', f'{bufk}k',
         '-threads', '0',
     ]
-    if encoder == 'libx264':
+    if encoder in ('h264_nvenc', 'hevc_nvenc', 'h264_amf', 'hevc_amf'):
+        args += ['-rc', 'cbr']
+    elif encoder == 'libx264':
         args += ['-x264-params', 'nal-hrd=cbr']
     elif encoder == 'libx265':
         args += ['-x265-params',
@@ -170,7 +258,7 @@ def build_encoder_args(probe, target_k):
     return args
 
 
-def build_writer_cmd_file(opath, w, h, fps_str, probe, target_k, preset=None, src_path=None):
+def build_writer_cmd_file(opath, w, h, fps_str, encoder, probe, target_k, preset=None, src_path=None):
     """ffmpeg cmd: raw rgb24 stdin -> encoded file (passthrough source params + metadata)."""
     cmd = [FFMPEG, '-y', '-hide_banner', '-loglevel', 'error',
            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{w}x{h}', '-r', fps_str,
@@ -179,15 +267,14 @@ def build_writer_cmd_file(opath, w, h, fps_str, probe, target_k, preset=None, sr
         # Second input: source file. Used only for container metadata.
         cmd += ['-i', src_path, '-map', '0:v', '-map_metadata', '1']
     cmd += ['-an']
-    cmd += build_encoder_args(probe, target_k)
-    encoder = CODEC_TO_ENCODER.get(probe['codec'], 'libx264')
+    cmd += build_encoder_args(encoder, probe, target_k)
     if preset and encoder in ('libx264', 'libx265', 'libvpx-vp9'):
         cmd += ['-preset', preset]
     cmd += [opath]
     return cmd
 
 
-def build_writer_cmd_cam(opath, w, h, fps, preset=None):
+def build_writer_cmd_cam(opath, w, h, fps, encoder='libx264', preset=None):
     """Cam fallback: no source to passthrough, use libx264/CRF defaults."""
     cmd = [FFMPEG, '-y', '-hide_banner', '-loglevel', 'error',
            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{w}x{h}', '-r', str(fps),
@@ -231,7 +318,7 @@ def measure_bitrate_k(path):
     return int(sz * 8 / dur / 1000) if dur > 0 and sz > 0 else 0
 
 
-def re_encode_bitrate(opath, probe, target_k, preset=None, src_path=None):
+def re_encode_bitrate(opath, encoder, probe, target_k, preset=None, src_path=None):
     """Re-encode opath in-place with higher bitrate target. Used when first pass undershoots.
     If src_path is given, container metadata is mapped from there (not from the intermediate)."""
     tmp = opath + '.tmp_rebr' + os.path.splitext(opath)[1]
@@ -239,8 +326,7 @@ def re_encode_bitrate(opath, probe, target_k, preset=None, src_path=None):
     if src_path:
         cmd += ['-i', src_path, '-map', '0:v', '-map_metadata', '1']
     cmd += ['-an']
-    cmd += build_encoder_args(probe, target_k)
-    encoder = CODEC_TO_ENCODER.get(probe['codec'], 'libx264')
+    cmd += build_encoder_args(encoder, probe, target_k)
     if preset and encoder in ('libx264', 'libx265', 'libvpx-vp9'):
         cmd += ['-preset', preset]
     cmd += [tmp]
@@ -354,7 +440,12 @@ def video_detect(
         prefetch: int = 2,
         preset: str = None,
         bitrate_margin: float = 1.30,
+        profile: Profile = None,
+        encoder: str = 'auto',
 ):
+    if profile is None:
+        profile = Profile(enabled=False)
+
     cam_reader = None
     probe = None
     if cam:
@@ -369,7 +460,8 @@ def video_detect(
             print(f'Could not find video device {ipath}. Please set a valid input.')
             return
     else:
-        probe = probe_video(ipath)
+        with profile.timer('probe'):
+            probe = probe_video(ipath)
         if probe is None or probe['width'] == 0:
             print(f'Could not probe {ipath} as a video file. Skipping file...')
             return
@@ -388,13 +480,20 @@ def video_detect(
 
     writer_proc = None
     target_k = 0
+    chosen_encoder = encoder
     if opath is not None:
         if probe is not None:
+            if encoder == 'auto':
+                chosen_encoder = CODEC_TO_ENCODER.get(probe['codec'], 'libx264')
             target_k = max(int(probe['bitrate_k'] * bitrate_margin), 1)
-            cmd = build_writer_cmd_file(opath, w, h, fps_str, probe, target_k,
+            cmd = build_writer_cmd_file(opath, w, h, fps_str, chosen_encoder, probe, target_k,
                                         preset=preset, src_path=ipath)
+            print(f'  [encode] encoder={chosen_encoder} target={target_k}k preset={preset}')
         else:
-            cmd = build_writer_cmd_cam(opath, w, h, fps, preset=preset)
+            if encoder == 'auto':
+                chosen_encoder = 'libx264'
+            cmd = build_writer_cmd_cam(opath, w, h, fps, encoder=chosen_encoder, preset=preset)
+            print(f'  [encode] encoder={chosen_encoder} preset={preset}')
         writer_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     BATCH_SIZE = batchsize
@@ -402,6 +501,8 @@ def video_detect(
     face_frames = 0
     raw_queue = queue.Queue(maxsize=prefetch)
     result_queue = queue.Queue(maxsize=prefetch)
+
+    profile.start_sampling(raw_queue, result_queue)
 
     def _reader():
         if cam:
@@ -458,30 +559,31 @@ def video_detect(
     writer_t = threading.Thread(target=_writer, daemon=True)
     writer_t.start()
 
-    while True:
-        buf = raw_queue.get()
-        if buf is None:
-            result_queue.put(None)
-            break
-        batch_results = centerface.batch_call(buf, threshold=threshold)
-        pairs = []
-        for f, (dets, _) in zip(buf, batch_results):
-            total_frames += 1
-            if len(dets) > 0:
-                face_frames += 1
-            pairs.append((f, dets))
-        result_queue.put(pairs)
+    with profile.timer('encode_wall'):
+        while True:
+            buf = raw_queue.get()
+            if buf is None:
+                result_queue.put(None)
+                break
+            batch_results = centerface.batch_call(buf, threshold=threshold)
+            pairs = []
+            for f, (dets, _) in zip(buf, batch_results):
+                total_frames += 1
+                if len(dets) > 0:
+                    face_frames += 1
+                pairs.append((f, dets))
+            result_queue.put(pairs)
 
-    writer_t.join()
-    if cam_reader is not None:
-        cam_reader.close()
-    if writer_proc is not None:
-        try:
-            writer_proc.stdin.close()
-        except Exception:
-            pass
-        writer_proc.wait()
-    bar.close()
+        writer_t.join()
+        if cam_reader is not None:
+            cam_reader.close()
+        if writer_proc is not None:
+            try:
+                writer_proc.stdin.close()
+            except Exception:
+                pass
+            writer_proc.wait()
+        bar.close()
 
     # Strict bitrate guarantee: re-encode if first pass undershot the source
     if probe is not None and opath is not None and writer_proc is not None \
@@ -489,17 +591,21 @@ def video_detect(
         actual_k = measure_bitrate_k(opath)
         src_k = probe['bitrate_k']
         if 0 < actual_k < src_k:
-            ratio = src_k / actual_k
-            new_target = max(int(target_k * ratio * 1.20), int(src_k * 1.50))
-            print(f'  [bitrate retry] actual {actual_k}k < src {src_k}k, '
-                  f're-encoding @ {new_target}k')
-            rc = re_encode_bitrate(opath, probe, new_target, preset=preset, src_path=ipath)
-            if rc != 0:
-                print(f'  [bitrate retry] re-encode failed (rc={rc})')
-            else:
-                final_k = measure_bitrate_k(opath)
-                if final_k < src_k:
-                    print(f'  [WARN] post-retry bitrate {final_k}k still < src {src_k}k')
+            with profile.timer('retry'):
+                ratio = src_k / actual_k
+                new_target = max(int(target_k * ratio * 1.20), int(src_k * 1.50))
+                print(f'  [bitrate retry] actual {actual_k}k < src {src_k}k, '
+                      f're-encoding @ {new_target}k')
+                rc = re_encode_bitrate(opath, chosen_encoder, probe, new_target, preset=preset, src_path=ipath)
+                if rc != 0:
+                    print(f'  [bitrate retry] re-encode failed (rc={rc})')
+                else:
+                    final_k = measure_bitrate_k(opath)
+                    if final_k < src_k:
+                        print(f'  [WARN] post-retry bitrate {final_k}k still < src {src_k}k')
+
+    profile.stop_sampling()
+    profile.report(prefetch, prefetch)
 
     return total_frames, face_frames
 
@@ -648,6 +754,11 @@ def parse_cli_args():
         help='Batch size for face detection inference (default: 8)')
     parser.add_argument('--prefetch', type=int, default=2, metavar='N',
         help='Queue depth for frame prefetch (default: 2)')
+    parser.add_argument('--profile', default=False, action='store_true',
+        help='Enable performance profiling (timing, resource monitoring, bottleneck diagnosis)')
+    parser.add_argument('--encoder', default='auto',
+        choices=['auto'] + VALID_ENCODERS,
+        help='Video encoder (default: auto - match source codec). Use libx264 for speed, GPU encoders (h264_nvenc, hevc_nvenc) if available.')
 
     args = parser.parse_args()
 
@@ -703,6 +814,8 @@ def main():
     # TODO: scalar downscaling setting (-> in_shape), preserving aspect ratio
     centerface = CenterFace(in_shape=in_shape, backend=backend, override_execution_provider=execution_provider)
 
+    prof = Profile(enabled=args.profile)
+
     multi_file = len(ipaths) > 1
     if multi_file:
         ipaths = tqdm.tqdm(ipaths, position=0, dynamic_ncols=True, desc='Batch progress')
@@ -739,6 +852,8 @@ def main():
                 prefetch=args.prefetch,
                 preset=args.preset,
                 bitrate_margin=args.bitrate_margin,
+                profile=prof,
+                encoder=args.encoder,
             )
             if result is not None and not is_cam:
                 total_frames, face_frames = result
