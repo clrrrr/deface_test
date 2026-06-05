@@ -514,15 +514,23 @@ def video_detect(
     inference_time = 0.0
     processing_time = 0.0
 
-    # Create second centerface for GPU1
+    # Create second centerface for GPU1 only if available
+    centerface_gpu1 = None
+    use_dual_gpu = False
     try:
-        centerface_gpu1 = CenterFace(in_shape=centerface.in_shape, backend=centerface.backend, gpu_id=1)
-        use_dual_gpu = True
-        print('  [dual-gpu] Enabled - using GPU0 and GPU1')
+        # Check GPU count first
+        import torch
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if gpu_count >= 2:
+            centerface_gpu1 = CenterFace(in_shape=centerface.in_shape, backend=centerface.backend, gpu_id=1)
+            use_dual_gpu = True
+            print(f'  [dual-gpu] Enabled - using GPU0 and GPU1 ({gpu_count} GPUs detected)')
+        else:
+            print(f'  [dual-gpu] Disabled - only {gpu_count} GPU(s) detected, using single GPU')
     except Exception as e:
         centerface_gpu1 = None
         use_dual_gpu = False
-        print(f'  [dual-gpu] Failed to initialize GPU1: {e}, using single GPU')
+        print(f'  [dual-gpu] Failed to initialize: {e}, using single GPU')
 
     profile.start_sampling(raw_queue, processed_queue)
 
@@ -618,7 +626,6 @@ def video_detect(
                         cv2.destroyAllWindows()
                         return
                 bar.update()
-                total_frames += 1
                 # Speed reporting every 10 seconds
                 now = time.time()
                 if now - last_report_time >= 10:
