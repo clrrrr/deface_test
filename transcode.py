@@ -37,25 +37,35 @@ def get_rotation(path):
              'stream=index:stream_tags=rotate:stream_side_data=rotation', path],
             capture_output=True, text=True, **kwargs
         )
+
+        print(f"[DEBUG] ffprobe path: {FFPROBE}")
+        print(f"[DEBUG] ffprobe returncode: {r.returncode}")
+
         if r.returncode != 0:
+            print(f"[DEBUG] ffprobe stderr: {r.stderr}")
             return 0
 
         output = r.stdout
+        print(f"[DEBUG] ffprobe output (first 500 chars):\n{output[:500]}")
 
         # Try to match "rotation of XX.XX degrees" from Display Matrix
         match = re.search(r'rotation\s+of\s+([-+]?\d+(?:\.\d+)?)\s+degrees', output, re.IGNORECASE)
         if match:
             rot = float(match.group(1))
+            print(f"[DEBUG] Matched rotation: {rot}")
             return int(rot) % 360
 
         # Try to match "rotate=XX" from tags
         match = re.search(r'rotate[=:]\s*([-+]?\d+)', output, re.IGNORECASE)
         if match:
             rot = int(match.group(1))
+            print(f"[DEBUG] Matched rotate tag: {rot}")
             return rot % 360
 
+        print(f"[DEBUG] No rotation pattern matched in output")
+
     except Exception as e:
-        pass
+        print(f"[DEBUG] Exception in get_rotation: {e}")
     return 0
 
 
