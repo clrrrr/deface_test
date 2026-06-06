@@ -41,10 +41,10 @@ def get_rotation(path):
 
     kwargs = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
     try:
-        # Get text output with side_data to see Display Matrix
+        # Get text output - don't use -show_entries to get full side_data details
         r = subprocess.run(
-            [FFPROBE, '-v', 'quiet', '-show_streams', '-show_entries',
-             'stream=index:stream_tags=rotate:stream_side_data=rotation', path],
+            [FFPROBE, '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream_side_data=rotation', '-of', 'default=nw=1', path],
             capture_output=True, text=True, **kwargs
         )
 
@@ -57,19 +57,12 @@ def get_rotation(path):
         output = r.stdout
         print(f"[DEBUG] ffprobe output (first 500 chars):\n{output[:500]}")
 
-        # Try to match "rotation of XX.XX degrees" from Display Matrix
-        match = re.search(r'rotation\s+of\s+([-+]?\d+(?:\.\d+)?)\s+degrees', output, re.IGNORECASE)
+        # Try to match "rotation=XX" from side_data output
+        match = re.search(r'rotation=([-+]?\d+(?:\.\d+)?)', output, re.IGNORECASE)
         if match:
             rot = float(match.group(1))
             print(f"[DEBUG] Matched rotation: {rot}")
             return int(rot) % 360
-
-        # Try to match "rotate=XX" from tags
-        match = re.search(r'rotate[=:]\s*([-+]?\d+)', output, re.IGNORECASE)
-        if match:
-            rot = int(match.group(1))
-            print(f"[DEBUG] Matched rotate tag: {rot}")
-            return rot % 360
 
         print(f"[DEBUG] No rotation pattern matched in output")
 
