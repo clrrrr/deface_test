@@ -13,6 +13,7 @@ for /f "delims=" %%i in ('python -c "import imageio_ffmpeg, os; print(os.path.di
 
 pyinstaller --onefile --windowed ^
   --add-binary "%FFMPEG_DIR%\*;imageio_ffmpeg\binaries" ^
+  --add-data "vendor;vendor" ^
   --collect-all imageio_ffmpeg ^
   transcode_gui.py
 

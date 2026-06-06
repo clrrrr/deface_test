@@ -15,7 +15,13 @@ import imageio_ffmpeg
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 # Get ffprobe from vendor directory (relative to this script)
-_script_dir = os.path.dirname(os.path.abspath(__file__))
+# Handle PyInstaller's temporary folder when packaged as exe
+if getattr(sys, 'frozen', False):
+    # Running as PyInstaller bundle
+    _script_dir = sys._MEIPASS
+else:
+    # Running as normal script
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
 _ffprobe_name = 'ffprobe.exe' if sys.platform == 'win32' else 'ffprobe'
 FFPROBE = os.path.join(_script_dir, 'vendor', _ffprobe_name)
 
@@ -29,6 +35,10 @@ RESOLUTIONS = {
 
 def get_rotation(path):
     """Get video rotation in degrees using ffprobe. Normalizes to 0-360 range."""
+    print(f"[DEBUG] ffprobe path: {FFPROBE}")
+    print(f"[DEBUG] ffprobe exists: {os.path.exists(FFPROBE)}")
+    print(f"[DEBUG] ffprobe is file: {os.path.isfile(FFPROBE)}")
+
     kwargs = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
     try:
         # Get text output with side_data to see Display Matrix
@@ -38,7 +48,6 @@ def get_rotation(path):
             capture_output=True, text=True, **kwargs
         )
 
-        print(f"[DEBUG] ffprobe path: {FFPROBE}")
         print(f"[DEBUG] ffprobe returncode: {r.returncode}")
 
         if r.returncode != 0:
@@ -66,6 +75,8 @@ def get_rotation(path):
 
     except Exception as e:
         print(f"[DEBUG] Exception in get_rotation: {e}")
+        import traceback
+        traceback.print_exc()
     return 0
 
 
