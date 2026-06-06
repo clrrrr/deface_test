@@ -9,3 +9,6 @@ scikit-image>=0.19
 # ONNX runtime backend (required). Falls back to OpenCV DNN if missing.
 onnx>=1.14
 onnxruntime-gpu==1.16.3
+
+# GPU management for multi-GPU support
+nvidia-ml-py3>=7.352.0

@@ -8,6 +8,7 @@ import mimetypes
 import os
 import queue
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -449,6 +450,15 @@ def video_detect(
     if profile is None:
         profile = Profile(enabled=False)
 
+    # Setup signal handler to cleanup OpenCV windows on Ctrl+C
+    def signal_handler(sig, frame):
+        print('\n[interrupted] Cleaning up...')
+        cv2.destroyAllWindows()
+        import sys
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+
     cam_reader = None
     probe = None
     if cam:
@@ -510,7 +520,6 @@ def video_detect(
     # Pipeline shape: when no resize needed, skip prep stage entirely
     # (prep workers are pure pass-through when in_shape=None, adding queue overhead for nothing)
     prep_needed = (centerface.in_shape is not None)
-    inference_q = prep_queue if prep_needed else raw_queue
 
     # Performance tracking
     start_time = time.time()
@@ -519,23 +528,59 @@ def video_detect(
     inference_time = 0.0
     processing_time = 0.0
 
-    # Create second centerface for GPU1 only if available
-    centerface_gpu1 = None
-    use_dual_gpu = False
+    # Auto-detect and create CenterFace instances for all available GPUs
+    gpu_centerfaces = []
+    gpu_count = 0
+
+    # Respect CUDA_VISIBLE_DEVICES environment variable
+    cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', None)
+    if cuda_visible is not None:
+        # User explicitly set visible devices
+        visible_ids = [x.strip() for x in cuda_visible.split(',') if x.strip()]
+        gpu_count = len(visible_ids)
+        print(f'  [gpu-detect] CUDA_VISIBLE_DEVICES={cuda_visible}, using {gpu_count} GPU(s)')
+    else:
+        # Try multiple methods to detect GPU count
+        try:
+            # Method 1: pynvml (lightweight, NVIDIA official)
+            import pynvml
+            pynvml.nvmlInit()
+            gpu_count = pynvml.nvmlDeviceGetCount()
+            pynvml.nvmlShutdown()
+        except Exception:
+            try:
+                # Method 2: torch (if available)
+                import torch
+                gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            except Exception:
+                try:
+                    # Method 3: onnxruntime CUDA provider
+                    import onnxruntime
+                    if 'CUDAExecutionProvider' in onnxruntime.get_available_providers():
+                        # Check via nvidia-smi (subprocess already imported at top)
+                        result = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True, timeout=5)
+                        gpu_count = len([line for line in result.stdout.split('\n') if 'GPU' in line])
+                except Exception:
+                    gpu_count = 0
+
     try:
-        # Check GPU count first
-        import torch
-        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-        if gpu_count >= 2:
-            centerface_gpu1 = CenterFace(in_shape=centerface.in_shape, backend=centerface.backend, gpu_id=1)
-            use_dual_gpu = True
-            print(f'  [dual-gpu] Enabled - using GPU0 and GPU1 ({gpu_count} GPUs detected)')
+        if gpu_count >= 1:
+            # Create CenterFace instance for each GPU
+            for gpu_id in range(gpu_count):
+                cf = CenterFace(in_shape=centerface.in_shape, backend=centerface.backend, gpu_id=gpu_id)
+                gpu_centerfaces.append((cf, gpu_id))
+            print(f'  [multi-gpu] Enabled - using {gpu_count} GPU(s): {", ".join(f"GPU{i}" for i in range(gpu_count))}')
         else:
-            print(f'  [dual-gpu] Disabled - only {gpu_count} GPU(s) detected, using single GPU')
+            # Fallback to single device
+            gpu_centerfaces = [(centerface, 0)]
+            print(f'  [multi-gpu] Disabled - no CUDA GPUs detected, using single device')
     except Exception as e:
-        centerface_gpu1 = None
-        use_dual_gpu = False
-        print(f'  [dual-gpu] Failed to initialize: {e}, using single GPU')
+        gpu_centerfaces = [(centerface, 0)]
+        print(f'  [multi-gpu] Failed to initialize: {e}, using single device')
+
+    # Create independent inference queue for each GPU (eliminates queue contention)
+    num_gpus = len(gpu_centerfaces)
+    inference_queues = [queue.Queue(maxsize=prefetch * 2) for _ in range(num_gpus)]
 
     profile.start_sampling(raw_queue, processed_queue)
 
@@ -543,17 +588,20 @@ def video_detect(
         """Resize frames - use faster algorithm and parallel within batch"""
         import concurrent.futures
         in_shape = centerface.in_shape
+        round_robin_idx = 0  # Round-robin distribution to GPU queues
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=prep_threads) as executor:
             while True:
                 buf = raw_queue.get()
                 if buf is None:
                     raw_queue.put(None)   # propagate to sibling prep workers
-                    prep_queue.put(None)  # propagate downstream to inference workers
+                    # Send stop signal to all GPU queues
+                    for inf_q in inference_queues:
+                        inf_q.put(None)
                     break
 
                 if in_shape is None:
-                    prep_queue.put([(f, f) for f in buf])
+                    prepped = [(f, f) for f in buf]
                 else:
                     orig_shape = buf[0].shape[:2]
                     w_new, h_new, scale_w, scale_h = centerface.shape_transform(in_shape, orig_shape)
@@ -564,7 +612,11 @@ def video_detect(
                         return (f, resized, scale_w, scale_h)
 
                     prepped = list(executor.map(resize_frame, buf))
-                    prep_queue.put(prepped)
+
+                # Round-robin distribution to GPU queues
+                target_queue = inference_queues[round_robin_idx % num_gpus]
+                target_queue.put(prepped)
+                round_robin_idx += 1
 
     def _reader():
         if cam:
@@ -645,19 +697,18 @@ def video_detect(
                     queue_put_t = getattr(centerface, '_queue_put_time', 0)
 
                     if cf_stats and cf_stats['count'] > 0:
-                        rgb_pct = cf_stats['rgb'] / elapsed * 100
-                        prep_pct = cf_stats['prep'] / elapsed * 100
+                        blob_pct = cf_stats['blob'] / elapsed * 100
                         infer_pct = cf_stats['infer'] / elapsed * 100
                         decode_pct = cf_stats['decode'] / elapsed * 100
                         proc_pct = processing_time / elapsed * 100
                         qget_pct = queue_get_t / elapsed * 100
                         qput_pct = queue_put_t / elapsed * 100
-                        other_pct = 100 - (rgb_pct + prep_pct + infer_pct + decode_pct + proc_pct + qget_pct + qput_pct)
+                        other_pct = 100 - (blob_pct + infer_pct + decode_pct + proc_pct + qget_pct + qput_pct)
 
                         print(f'  [speed] {fps:.2f} fps avg, {recent_fps:.2f} fps recent, '
                               f'{total_frames}/{nframes or "?"} frames, '
                               f'queues: raw={raw_queue.qsize()} det={det_queue.qsize()} proc={processed_queue.qsize()}')
-                        print(f'  [detail] prep={prep_pct:.1f}% infer={infer_pct:.1f}% decode={decode_pct:.1f}% '
+                        print(f'  [inference] blob={blob_pct:.1f}% infer={infer_pct:.1f}% decode={decode_pct:.1f}% | '
                               f'proc={proc_pct:.1f}% qget={qget_pct:.1f}% qput={qput_pct:.1f}% other={other_pct:.1f}%')
                     else:
                         inf_pct = inference_time / elapsed * 100 if elapsed > 0 else 0
@@ -672,13 +723,13 @@ def video_detect(
     # Start threads
     threading.Thread(target=_reader, daemon=True).start()
 
-    # Start prep workers only when resize is actually needed
+    # Always start prep workers (they distribute data to GPU queues)
+    for i in range(prep_workers):
+        threading.Thread(target=lambda wid=i: _prep_worker(wid), daemon=True).start()
     if prep_needed:
-        for i in range(prep_workers):
-            threading.Thread(target=lambda wid=i: _prep_worker(wid), daemon=True).start()
         print(f'  [prep] {prep_workers} workers (in_shape={centerface.in_shape})')
     else:
-        print(f'  [prep] bypassed (in_shape=None, inference reads raw_queue directly)')
+        print(f'  [prep] {prep_workers} workers distributing to {num_gpus} GPU(s) (no resize)')
 
     processor_t = threading.Thread(target=_processor, daemon=True)
     processor_t.start()
@@ -686,18 +737,17 @@ def video_detect(
     writer_t.start()
 
     # Inference threads for dual-GPU
-    def _inference_worker(cf, gpu_id):
+    def _inference_worker(cf, gpu_id, inf_queue):
         import concurrent.futures
         nonlocal total_frames, face_frames, inference_time, processing_time
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=infer_threads) as executor:
             while True:
                 t_get = time.time()
-                item = inference_q.get()
+                item = inf_queue.get()  # Read from dedicated GPU queue
                 queue_get_time = time.time() - t_get
 
                 if item is None:
-                    inference_q.put(None)  # propagate to sibling inference workers
                     det_queue.put(None)
                     break
 
@@ -713,23 +763,25 @@ def video_detect(
                 else:
                     # Resized case: use pre-resized frames for inference
                     resized_frames = [pair[1] for pair in item]
-                    # Parallel blob creation
-                    t1 = time.time()
 
+                    # Parallel blob creation
+                    t_blob_start = time.time()
                     def make_blob(img):
                         return cv2.dnn.blobFromImage(img, scalefactor=1.0, size=(img.shape[1], img.shape[0]),
                                  mean=(0, 0, 0), swapRB=False, crop=False)
-
                     blobs = list(executor.map(make_blob, resized_frames))
                     batch_blob = np.concatenate(blobs, axis=0)
+                    t_blob = time.time() - t_blob_start
 
+                    # ONNX inference
+                    t_infer_start = time.time()
                     heatmaps, scales, offsets, lms_batch = cf.sess.run(
                         cf.onnx_output_names, {cf.onnx_input_name: batch_blob}
                     )
-                    t_infer = time.time() - t1
+                    t_infer = time.time() - t_infer_start
 
                     # Parallel decode results
-                    t2 = time.time()
+                    t_decode_start = time.time()
 
                     def decode_frame(b):
                         scale_w, scale_h = item[b][2], item[b][3]
@@ -749,13 +801,14 @@ def video_detect(
                         return (dets, lms)
 
                     batch_results = list(executor.map(decode_frame, range(len(resized_frames))))
+                    t_decode = time.time() - t_decode_start
 
-                    # Update timing stats
+                    # Update detailed timing stats
                     if not hasattr(cf, '_timing_stats'):
-                        cf._timing_stats = {'rgb': 0, 'prep': 0, 'infer': 0, 'decode': 0, 'count': 0}
-                    cf._timing_stats['prep'] += 0  # Prep done in separate thread
+                        cf._timing_stats = {'blob': 0, 'infer': 0, 'decode': 0, 'count': 0}
+                    cf._timing_stats['blob'] += t_blob
                     cf._timing_stats['infer'] += t_infer
-                    cf._timing_stats['decode'] += time.time() - t2
+                    cf._timing_stats['decode'] += t_decode
                     cf._timing_stats['count'] += 1
 
                 inference_time += time.time() - t0
@@ -780,19 +833,23 @@ def video_detect(
                 cf._queue_get_time += queue_get_time
                 cf._queue_put_time += queue_put_time
 
-    # TODO: Create second centerface and launch dual inference threads
+    # Launch inference worker for each GPU
     with profile.timer('encode_wall'):
-        if use_dual_gpu:
-            # Launch two inference threads
-            inf_t1 = threading.Thread(target=lambda: _inference_worker(centerface, 0), daemon=True)
-            inf_t2 = threading.Thread(target=lambda: _inference_worker(centerface_gpu1, 1), daemon=True)
-            inf_t1.start()
-            inf_t2.start()
-            inf_t1.join()
-            inf_t2.join()
+        if len(gpu_centerfaces) > 1:
+            # Multi-GPU: launch one worker thread per GPU with dedicated queue
+            inference_threads = []
+            for idx, (cf, gpu_id) in enumerate(gpu_centerfaces):
+                inf_q = inference_queues[idx]
+                t = threading.Thread(target=lambda c=cf, g=gpu_id, q=inf_q: _inference_worker(c, g, q), daemon=True)
+                t.start()
+                inference_threads.append(t)
+            # Wait for all inference threads to complete
+            for t in inference_threads:
+                t.join()
         else:
-            # Single GPU fallback
-            _inference_worker(centerface, 0)
+            # Single device: run inference worker in main thread
+            cf, gpu_id = gpu_centerfaces[0]
+            _inference_worker(cf, gpu_id, inference_queues[0])
 
         processor_t.join()
         writer_t.join()
