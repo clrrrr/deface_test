@@ -8,6 +8,7 @@ import io
 import time
 import json
 import shutil
+import re
 import cv2
 from tqdm import tqdm
 import imageio_ffmpeg
@@ -30,29 +31,31 @@ def get_rotation(path):
     """Get video rotation in degrees using ffprobe. Normalizes to 0-360 range."""
     kwargs = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
     try:
+        # Get text output with side_data to see Display Matrix
         r = subprocess.run(
-            [FFPROBE, '-v', 'quiet', '-print_format', 'json', '-show_streams', path],
+            [FFPROBE, '-v', 'quiet', '-show_streams', '-show_entries',
+             'stream=index:stream_tags=rotate:stream_side_data=rotation', path],
             capture_output=True, text=True, **kwargs
         )
         if r.returncode != 0:
             return 0
-        data = json.loads(r.stdout)
-        for stream in data.get('streams', []):
-            if stream.get('codec_type') == 'video':
-                # Try tags first (older format)
-                rotation = stream.get('tags', {}).get('rotate')
-                if rotation:
-                    rot = int(rotation)
-                    return rot % 360
 
-                # Try side_data_list for Display Matrix rotation (newer format)
-                for side_data in stream.get('side_data_list', []):
-                    if side_data.get('side_data_type') == 'Display Matrix':
-                        rot = side_data.get('rotation')
-                        if rot is not None:
-                            return int(rot) % 360
-    except:
-        return 0
+        output = r.stdout
+
+        # Try to match "rotation of XX.XX degrees" from Display Matrix
+        match = re.search(r'rotation\s+of\s+([-+]?\d+(?:\.\d+)?)\s+degrees', output, re.IGNORECASE)
+        if match:
+            rot = float(match.group(1))
+            return int(rot) % 360
+
+        # Try to match "rotate=XX" from tags
+        match = re.search(r'rotate[=:]\s*([-+]?\d+)', output, re.IGNORECASE)
+        if match:
+            rot = int(match.group(1))
+            return rot % 360
+
+    except Exception as e:
+        pass
     return 0
 
 
@@ -123,12 +126,13 @@ def build_cmd(input_path, output_path, args, encoder, info, target_br=None):
     filters = []
     # Apply rotation correction first to make video upright
     rotation = info.get('rotation', 0)
-    if rotation == 90:
-        filters.append('transpose=1')  # 90° clockwise
-    elif rotation == 180:
-        filters.append('transpose=2,transpose=2')  # 180°
-    elif rotation == 270:
-        filters.append('transpose=2')  # 90° counter-clockwise
+    # Handle standard rotations with tolerance for floating point values
+    if 45 < rotation <= 135:  # ~90°
+        filters.append('transpose=1')
+    elif 135 < rotation <= 225:  # ~180°
+        filters.append('transpose=2,transpose=2')
+    elif 225 < rotation < 315:  # ~270°
+        filters.append('transpose=2')
 
     if args.fps is not None:
         filters.append(f"fps={args.fps}")
