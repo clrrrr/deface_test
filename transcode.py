@@ -7,12 +7,16 @@ import sys
 import io
 import time
 import json
+import shutil
 import cv2
 from tqdm import tqdm
 import imageio_ffmpeg
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
-FFPROBE = imageio_ffmpeg.get_ffmpeg_exe().replace('ffmpeg', 'ffprobe')
+# Get ffprobe from vendor directory (relative to this script)
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_ffprobe_name = 'ffprobe.exe' if sys.platform == 'win32' else 'ffprobe'
+FFPROBE = os.path.join(_script_dir, 'vendor', _ffprobe_name)
 
 RESOLUTIONS = {
     '480p':  '854:480',
@@ -202,8 +206,11 @@ def process_file(input_path, args, encoder, progress_cb=None, stop_event=None):
     print(f"  bitrate:    {info['bitrate']} kbps")
     print(f"  fps:        {info['fps']:.2f}")
     print(f"  resolution: {info['width']}x{info['height']}")
-    if info.get('rotation'):
-        print(f"  rotation:   {info['rotation']}° (will be corrected)")
+    rotation = info.get('rotation', 0)
+    if rotation:
+        print(f"  [DEBUG] 识别到rotation信息：{rotation}度")
+    else:
+        print(f"  [DEBUG] 未识别到rotation信息")
     print(f"  codec:      {info['codec']}")
     print(f"  format:     {info['format']}")
 
