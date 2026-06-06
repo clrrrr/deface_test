@@ -39,11 +39,18 @@ def get_rotation(path):
         data = json.loads(r.stdout)
         for stream in data.get('streams', []):
             if stream.get('codec_type') == 'video':
-                rotation = stream.get('tags', {}).get('rotate', 0)
+                # Try tags first (older format)
+                rotation = stream.get('tags', {}).get('rotate')
                 if rotation:
                     rot = int(rotation)
-                    # Normalize negative rotations: -90 -> 270, -180 -> 180, -270 -> 90
                     return rot % 360
+
+                # Try side_data_list for Display Matrix rotation (newer format)
+                for side_data in stream.get('side_data_list', []):
+                    if side_data.get('side_data_type') == 'Display Matrix':
+                        rot = side_data.get('rotation')
+                        if rot is not None:
+                            return int(rot) % 360
     except:
         return 0
     return 0
