@@ -6,11 +6,13 @@ import glob
 import sys
 import io
 import time
+import json
 import cv2
 from tqdm import tqdm
 import imageio_ffmpeg
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+FFPROBE = imageio_ffmpeg.get_ffmpeg_exe().replace('ffmpeg', 'ffprobe')
 
 RESOLUTIONS = {
     '480p':  '854:480',
@@ -18,6 +20,30 @@ RESOLUTIONS = {
     '1080p': '1920:1080',
     '4k':    '3840:2160',
 }
+
+
+def get_rotation(path):
+    """Get video rotation in degrees using ffprobe. Normalizes to 0-360 range."""
+    kwargs = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
+    try:
+        r = subprocess.run(
+            [FFPROBE, '-v', 'quiet', '-print_format', 'json', '-show_streams', path],
+            capture_output=True, text=True, **kwargs
+        )
+        if r.returncode != 0:
+            return 0
+        data = json.loads(r.stdout)
+        for stream in data.get('streams', []):
+            if stream.get('codec_type') == 'video':
+                rotation = stream.get('tags', {}).get('rotate', 0)
+                if rotation:
+                    rot = int(rotation)
+                    # Normalize negative rotations: -90 -> 270, -180 -> 180, -270 -> 90
+                    return rot % 360
+    except:
+        return 0
+    return 0
+
 
 # (codec, gpu) -> ffmpeg encoder
 ENCODERS = {
@@ -45,12 +71,18 @@ def get_video_info(path):
     fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
     codec = ''.join(chr((fourcc >> 8 * i) & 0xFF) for i in range(4)).strip()
     cap.release()
+
+    rotation = get_rotation(path)
+    # 90° or 270° rotation means width/height are swapped
+    if abs(rotation) in (90, 270):
+        w, h = h, w
+
     size = os.path.getsize(path) if os.path.exists(path) else 0
     duration = total / fps
     bitrate = int(size * 8 / duration / 1000) if duration > 0 else 0
     fmt = os.path.splitext(path)[1].lstrip('.')
     return {'fps': fps, 'nframes': total, 'width': w, 'height': h,
-            'size': size, 'bitrate': bitrate, 'codec': codec, 'format': fmt}
+            'size': size, 'bitrate': bitrate, 'codec': codec, 'format': fmt, 'rotation': rotation}
 
 
 def detect_gpu():
@@ -78,6 +110,15 @@ def build_cmd(input_path, output_path, args, encoder, info, target_br=None):
         cmd += ['-frames:v', str(args.end_frame - args.start_frame)]
 
     filters = []
+    # Apply rotation correction first to make video upright
+    rotation = info.get('rotation', 0)
+    if rotation == 90:
+        filters.append('transpose=1')  # 90° clockwise
+    elif rotation == 180:
+        filters.append('transpose=2,transpose=2')  # 180°
+    elif rotation == 270:
+        filters.append('transpose=2')  # 90° counter-clockwise
+
     if args.fps is not None:
         filters.append(f"fps={args.fps}")
     if args.resolution != 'original':
@@ -161,6 +202,8 @@ def process_file(input_path, args, encoder, progress_cb=None, stop_event=None):
     print(f"  bitrate:    {info['bitrate']} kbps")
     print(f"  fps:        {info['fps']:.2f}")
     print(f"  resolution: {info['width']}x{info['height']}")
+    if info.get('rotation'):
+        print(f"  rotation:   {info['rotation']}° (will be corrected)")
     print(f"  codec:      {info['codec']}")
     print(f"  format:     {info['format']}")
 
