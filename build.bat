@@ -4,19 +4,27 @@
 set CONDA=C:\Users\user\miniforge3\Scripts\conda.exe
 set CONDA_ROOT=C:\Users\user\miniforge3
 
+:: 检查 vendor\ffprobe.exe 是否存在
+if not exist "vendor\ffprobe.exe" (
+    echo [ERROR] vendor\ffprobe.exe 不存在
+    echo 请先将 ffprobe.exe 放入 vendor\ 目录
+    pause
+    exit /b 1
+)
+
 :: 激活 deface 环境
 call "%CONDA_ROOT%\condabin\conda.bat" activate deface
 
 pip install pyinstaller -q
 
-for /f "delims=" %%i in ('python -c "import imageio_ffmpeg, os; print(os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe()))"') do set FFMPEG_DIR=%%i
+:: 清理之前的构建
+if exist "build" rmdir /s /q build
+if exist "dist" rmdir /s /q dist
 
-pyinstaller --onefile --windowed ^
-  --add-binary "%FFMPEG_DIR%\*;imageio_ffmpeg\binaries" ^
-  --add-data "vendor;vendor" ^
-  --collect-all imageio_ffmpeg ^
-  transcode_gui.py
+:: 使用 spec 文件打包
+pyinstaller transcode_gui.spec --clean --noconfirm
 
 echo.
-echo 打包完成，输出：dist\transcode_gui.exe
+echo 打包完成，输出：dist\transcode_gui\
+echo 运行：dist\transcode_gui\transcode_gui.exe
 pause
