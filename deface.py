@@ -691,18 +691,28 @@ def video_detect(
                     fps = total_frames / elapsed if elapsed > 0 else 0
                     recent_fps = (total_frames - last_report_frames) / (now - last_report_time)
 
-                    # Get detailed timing from centerface
-                    cf_stats = getattr(centerface, '_timing_stats', None)
-                    queue_get_t = getattr(centerface, '_queue_get_time', 0)
-                    queue_put_t = getattr(centerface, '_queue_put_time', 0)
+                    # Get detailed timing from all GPU workers
+                    all_stats = {'blob': 0, 'infer': 0, 'decode': 0, 'count': 0}
+                    total_queue_get_t = 0
+                    total_queue_put_t = 0
 
-                    if cf_stats and cf_stats['count'] > 0:
-                        blob_pct = cf_stats['blob'] / elapsed * 100
-                        infer_pct = cf_stats['infer'] / elapsed * 100
-                        decode_pct = cf_stats['decode'] / elapsed * 100
+                    for cf, _ in gpu_centerfaces:
+                        cf_stats = getattr(cf, '_timing_stats', None)
+                        if cf_stats:
+                            all_stats['blob'] += cf_stats.get('blob', 0)
+                            all_stats['infer'] += cf_stats.get('infer', 0)
+                            all_stats['decode'] += cf_stats.get('decode', 0)
+                            all_stats['count'] += cf_stats.get('count', 0)
+                        total_queue_get_t += getattr(cf, '_queue_get_time', 0)
+                        total_queue_put_t += getattr(cf, '_queue_put_time', 0)
+
+                    if all_stats['count'] > 0:
+                        blob_pct = all_stats['blob'] / elapsed * 100
+                        infer_pct = all_stats['infer'] / elapsed * 100
+                        decode_pct = all_stats['decode'] / elapsed * 100
                         proc_pct = processing_time / elapsed * 100
-                        qget_pct = queue_get_t / elapsed * 100
-                        qput_pct = queue_put_t / elapsed * 100
+                        qget_pct = total_queue_get_t / elapsed * 100
+                        qput_pct = total_queue_put_t / elapsed * 100
                         other_pct = 100 - (blob_pct + infer_pct + decode_pct + proc_pct + qget_pct + qput_pct)
 
                         print(f'  [speed] {fps:.2f} fps avg, {recent_fps:.2f} fps recent, '
@@ -772,6 +782,11 @@ def video_detect(
                     blobs = list(executor.map(make_blob, resized_frames))
                     batch_blob = np.concatenate(blobs, axis=0)
                     t_blob = time.time() - t_blob_start
+
+                    # Debug: Print batch shape (first time only)
+                    if not hasattr(cf, '_batch_shape_printed'):
+                        print(f'  [debug GPU{gpu_id}] batch_blob.shape={batch_blob.shape}, batchsize={len(resized_frames)}')
+                        cf._batch_shape_printed = True
 
                     # ONNX inference
                     t_infer_start = time.time()
