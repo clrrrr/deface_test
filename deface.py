@@ -763,8 +763,8 @@ def video_detect(
 
                 t0 = time.time()
                 if not prep_needed:
-                    # Bypass: item is the raw buf (list of frames)
-                    frames = item
+                    # Extract frames from tuples (prep_worker wraps as [(f, f), ...])
+                    frames = [pair[0] for pair in item]
                     batch_results = cf.batch_call(frames, threshold=threshold)
                 elif centerface.in_shape is None:
                     # Defensive: shouldn't reach here when prep_needed is False, but keep parity
@@ -1030,7 +1030,7 @@ def parse_cli_args():
         '--mosaicsize', default=20, type=int, metavar='width',
         help='Setting the mosaic size. Requires --replacewith mosaic option. Default: 20.')
     parser.add_argument(
-        '--bitrate-margin', default=1.30, type=float, metavar='M',
+        '--bitrate-margin', default=1.10, type=float, metavar='M',
         help='Output bitrate target = source_bitrate * M. Output is guaranteed >= source via CBR + retry. Default: 1.30.')
     parser.add_argument(
         '--backend', default='auto', choices=['auto', 'onnxrt', 'opencv'],
