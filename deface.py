@@ -1096,6 +1096,8 @@ def parse_cli_args():
     parser.add_argument('--help', '-h', action='help', help='Show this help message and exit.')
 
     # Performance options
+    parser.add_argument('--detector', default='centerface', choices=['centerface', 'scrfd'],
+        help='Face detector model: centerface (default, faster) or scrfd (more accurate)')
     parser.add_argument('--preset', default='fast',
         choices=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow'],
         help='Encoder preset for output video (default: fast)')
@@ -1203,8 +1205,14 @@ def main():
         print(f'After opening {args.replaceimg} shape: {replaceimg.shape}')
 
 
-    # TODO: scalar downscaling setting (-> in_shape), preserving aspect ratio
-    centerface = CenterFace(in_shape=in_shape, backend=backend, override_execution_provider=execution_provider)
+    # Create face detector based on user choice
+    if args.detector == 'scrfd':
+        from scrfd import SCRFD
+        centerface = SCRFD(in_shape=in_shape, backend=backend, override_execution_provider=execution_provider)
+        print(f'Using SCRFD detector (higher accuracy, lower false positives)')
+    else:
+        centerface = CenterFace(in_shape=in_shape, backend=backend, override_execution_provider=execution_provider)
+        print(f'Using CenterFace detector (faster, may have more false positives)')
 
     prof = Profile(enabled=args.profile)
 
