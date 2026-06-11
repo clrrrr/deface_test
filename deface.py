@@ -576,9 +576,15 @@ def video_detect(
 
     try:
         if gpu_count >= 1:
-            # Create CenterFace instance for each GPU
+            # Create detector instance for each GPU
+            detector_class = type(centerface)
             for gpu_id in range(gpu_count):
-                cf = CenterFace(in_shape=centerface.in_shape, backend=centerface.backend, gpu_id=gpu_id)
+                if detector_class.__name__ == 'SCRFD':
+                    from scrfd import SCRFD
+                    cf = SCRFD(in_shape=centerface.in_shape, backend=centerface.backend,
+                              override_execution_provider=centerface.override_execution_provider, gpu_id=gpu_id)
+                else:
+                    cf = CenterFace(in_shape=centerface.in_shape, backend=centerface.backend, gpu_id=gpu_id)
                 gpu_centerfaces.append((cf, gpu_id))
             print(f'  [multi-gpu] Enabled - using {gpu_count} GPU(s): {", ".join(f"GPU{i}" for i in range(gpu_count))}')
         else:
@@ -820,57 +826,60 @@ def video_detect(
                     # Resized case: use pre-resized frames for inference
                     resized_frames = [pair[1] for pair in data]
 
-                    # Parallel blob creation
-                    t_blob_start = time.time()
-                    def make_blob(img):
-                        return cv2.dnn.blobFromImage(img, scalefactor=1.0, size=(img.shape[1], img.shape[0]),
-                                 mean=(0, 0, 0), swapRB=False, crop=False)
-                    blobs = list(executor.map(make_blob, resized_frames))
-                    batch_blob = np.concatenate(blobs, axis=0)
-                    t_blob = time.time() - t_blob_start
+                    # Check if SCRFD (has detect method) or CenterFace (has onnx_output_names)
+                    if hasattr(cf, 'onnx_output_names'):
+                        # CenterFace path
+                        t_blob_start = time.time()
+                        def make_blob(img):
+                            return cv2.dnn.blobFromImage(img, scalefactor=1.0, size=(img.shape[1], img.shape[0]),
+                                     mean=(0, 0, 0), swapRB=False, crop=False)
+                        blobs = list(executor.map(make_blob, resized_frames))
+                        batch_blob = np.concatenate(blobs, axis=0)
+                        t_blob = time.time() - t_blob_start
 
-                    # Debug: Print batch shape (first time only)
-                    if not hasattr(cf, '_batch_shape_printed'):
-                        print(f'  [debug GPU{gpu_id}] batch_blob.shape={batch_blob.shape}, batchsize={len(resized_frames)}')
-                        cf._batch_shape_printed = True
+                        if not hasattr(cf, '_batch_shape_printed'):
+                            print(f'  [debug GPU{gpu_id}] batch_blob.shape={batch_blob.shape}, batchsize={len(resized_frames)}')
+                            cf._batch_shape_printed = True
 
-                    # ONNX inference
-                    t_infer_start = time.time()
-                    heatmaps, scales, offsets, lms_batch = cf.sess.run(
-                        cf.onnx_output_names, {cf.onnx_input_name: batch_blob}
-                    )
-                    t_infer = time.time() - t_infer_start
-
-                    # Parallel decode results
-                    t_decode_start = time.time()
-
-                    def decode_frame(b):
-                        scale_w, scale_h = data[b][2], data[b][3]
-                        h_new, w_new = resized_frames[b].shape[:2]
-                        dets, lms = cf.decode(
-                            heatmaps[b:b+1], scales[b:b+1], offsets[b:b+1], lms_batch[b:b+1],
-                            (h_new, w_new), threshold=threshold
+                        t_infer_start = time.time()
+                        heatmaps, scales, offsets, lms_batch = cf.sess.run(
+                            cf.onnx_output_names, {cf.onnx_input_name: batch_blob}
                         )
-                        if len(dets) > 0:
-                            dets[:, 0:4:2] /= scale_w
-                            dets[:, 1:4:2] /= scale_h
-                            lms[:, 0:10:2] /= scale_w
-                            lms[:, 1:10:2] /= scale_h
-                        else:
-                            dets = np.empty(shape=[0, 5], dtype=np.float32)
-                            lms = np.empty(shape=[0, 10], dtype=np.float32)
-                        return (dets, lms)
+                        t_infer = time.time() - t_infer_start
 
-                    batch_results = list(executor.map(decode_frame, range(len(resized_frames))))
-                    t_decode = time.time() - t_decode_start
+                        t_decode_start = time.time()
+                        def decode_frame(b):
+                            scale_w, scale_h = data[b][2], data[b][3]
+                            h_new, w_new = resized_frames[b].shape[:2]
+                            dets, lms = cf.decode(
+                                heatmaps[b:b+1], scales[b:b+1], offsets[b:b+1], lms_batch[b:b+1],
+                                (h_new, w_new), threshold=threshold
+                            )
+                            if len(dets) > 0:
+                                dets[:, 0:4:2] /= scale_w
+                                dets[:, 1:4:2] /= scale_h
+                                lms[:, 0:10:2] /= scale_w
+                                lms[:, 1:10:2] /= scale_h
+                            else:
+                                dets = np.empty(shape=[0, 5], dtype=np.float32)
+                                lms = np.empty(shape=[0, 10], dtype=np.float32)
+                            return (dets, lms)
+                        batch_results = list(executor.map(decode_frame, range(len(resized_frames))))
+                        t_decode = time.time() - t_decode_start
 
-                    # Update detailed timing stats
-                    if not hasattr(cf, '_timing_stats'):
-                        cf._timing_stats = {'blob': 0, 'infer': 0, 'decode': 0, 'count': 0}
-                    cf._timing_stats['blob'] += t_blob
-                    cf._timing_stats['infer'] += t_infer
-                    cf._timing_stats['decode'] += t_decode
-                    cf._timing_stats['count'] += 1
+                        if not hasattr(cf, '_timing_stats'):
+                            cf._timing_stats = {'blob': 0, 'infer': 0, 'decode': 0, 'count': 0}
+                        cf._timing_stats['blob'] += t_blob
+                        cf._timing_stats['infer'] += t_infer
+                        cf._timing_stats['decode'] += t_decode
+                        cf._timing_stats['count'] += 1
+                    else:
+                        # SCRFD path - call detect on original frames with scale info
+                        def detect_frame(b):
+                            original = data[b][0]
+                            dets, lms = cf.detect(original, threshold=threshold)
+                            return (dets, lms)
+                        batch_results = list(executor.map(detect_frame, range(len(data))))
 
                 inference_time += time.time() - t0
 
