@@ -399,7 +399,7 @@ def draw_det(
 
 def anonymize_frame(
         dets, frame, mask_scale,
-        replacewith, ellipse, draw_scores, replaceimg, mosaicsize
+        replacewith, ellipse, draw_scores, replaceimg, mosaicsize, prconf=False
 ):
     for i, det in enumerate(dets):
         boxes, score = det[:4], det[4]
@@ -416,6 +416,16 @@ def anonymize_frame(
             replaceimg=replaceimg,
             mosaicsize=mosaicsize
         )
+
+        # Draw green bounding box with confidence score
+        if prconf:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            conf_text = f'{score:.2f}'
+            font_scale = 0.8
+            thickness = 2
+            (text_width, text_height), baseline = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+            cv2.rectangle(frame, (x1, y1 - text_height - baseline - 5), (x1 + text_width, y1), (0, 255, 0), -1)
+            cv2.putText(frame, conf_text, (x1, y1 - baseline - 5), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness)
 
 
 def cam_read_iter(reader):
@@ -446,6 +456,7 @@ def video_detect(
         prep_workers: int = 6,
         prep_threads: int = 2,
         infer_threads: int = 4,
+        prconf: bool = False,
 ):
     if profile is None:
         profile = Profile(enabled=False)
@@ -582,6 +593,10 @@ def video_detect(
     num_gpus = len(gpu_centerfaces)
     inference_queues = [queue.Queue(maxsize=prefetch * 2) for _ in range(num_gpus)]
 
+    # Batch sequence tracking for correct frame order
+    batch_counter = [0]  # Use list for mutability across threads
+    batch_counter_lock = threading.Lock()
+
     profile.start_sampling(raw_queue, processed_queue)
 
     def _prep_worker(worker_id):
@@ -595,10 +610,16 @@ def video_detect(
                 buf = raw_queue.get()
                 if buf is None:
                     raw_queue.put(None)   # propagate to sibling prep workers
-                    # Send stop signal to all GPU queues
-                    for inf_q in inference_queues:
-                        inf_q.put(None)
+                    # Only first worker sends stop signal to GPU queues
+                    if worker_id == 0:
+                        for inf_q in inference_queues:
+                            inf_q.put(None)
                     break
+
+                # Assign unique batch_id
+                with batch_counter_lock:
+                    batch_id = batch_counter[0]
+                    batch_counter[0] += 1
 
                 if in_shape is None:
                     prepped = [(f, f) for f in buf]
@@ -613,9 +634,9 @@ def video_detect(
 
                     prepped = list(executor.map(resize_frame, buf))
 
-                # Round-robin distribution to GPU queues
+                # Round-robin distribution to GPU queues with batch_id
                 target_queue = inference_queues[round_robin_idx % num_gpus]
-                target_queue.put(prepped)
+                target_queue.put((batch_id, prepped))
                 round_robin_idx += 1
 
     def _reader():
@@ -651,20 +672,42 @@ def video_detect(
         raw_queue.put(None)
 
     def _processor():
+        # Buffer for out-of-order batches
+        batch_buffer = {}
+        next_batch_id = 0
+        frame_counter = 0
+
         while True:
             item = det_queue.get()
             if item is None:
                 processed_queue.put(None)
                 break
-            processed = []
-            for f, dets in item:
-                # Only anonymize if faces detected (optimization for no-face frames)
-                if len(dets) > 0:
-                    anonymize_frame(dets, f, mask_scale=mask_scale,
-                        replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
-                        replaceimg=replaceimg, mosaicsize=mosaicsize)
-                processed.append(f)
-            processed_queue.put(processed)
+
+            # Unpack batch_id and pairs
+            batch_id, pairs = item
+            batch_buffer[batch_id] = pairs
+
+            # Output batches in order
+            while next_batch_id in batch_buffer:
+                pairs = batch_buffer.pop(next_batch_id)
+                processed = []
+                for f, dets in pairs:
+                    # Only anonymize if faces detected (optimization for no-face frames)
+                    if len(dets) > 0:
+                        anonymize_frame(dets, f, mask_scale=mask_scale,
+                            replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
+                            replaceimg=replaceimg, mosaicsize=mosaicsize, prconf=prconf)
+
+                    # Draw frame info if prconf enabled
+                    if prconf:
+                        time_sec = frame_counter / fps if fps > 0 else 0
+                        info_text = f"Frame: {frame_counter} | Time: {time_sec:.2f}s"
+                        cv2.putText(f, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        frame_counter += 1
+
+                    processed.append(f)
+                processed_queue.put(processed)
+                next_batch_id += 1
 
     def _writer():
         nonlocal total_frames, last_report_time, last_report_frames
@@ -761,18 +804,21 @@ def video_detect(
                     det_queue.put(None)
                     break
 
+                # Unpack batch_id and data
+                batch_id, data = item
+
                 t0 = time.time()
                 if not prep_needed:
                     # Extract frames from tuples (prep_worker wraps as [(f, f), ...])
-                    frames = [pair[0] for pair in item]
+                    frames = [pair[0] for pair in data]
                     batch_results = cf.batch_call(frames, threshold=threshold)
                 elif centerface.in_shape is None:
                     # Defensive: shouldn't reach here when prep_needed is False, but keep parity
-                    frames = [pair[0] for pair in item]
+                    frames = [pair[0] for pair in data]
                     batch_results = cf.batch_call(frames, threshold=threshold)
                 else:
                     # Resized case: use pre-resized frames for inference
-                    resized_frames = [pair[1] for pair in item]
+                    resized_frames = [pair[1] for pair in data]
 
                     # Parallel blob creation
                     t_blob_start = time.time()
@@ -799,7 +845,7 @@ def video_detect(
                     t_decode_start = time.time()
 
                     def decode_frame(b):
-                        scale_w, scale_h = item[b][2], item[b][3]
+                        scale_w, scale_h = data[b][2], data[b][3]
                         h_new, w_new = resized_frames[b].shape[:2]
                         dets, lms = cf.decode(
                             heatmaps[b:b+1], scales[b:b+1], offsets[b:b+1], lms_batch[b:b+1],
@@ -831,7 +877,7 @@ def video_detect(
                 t1 = time.time()
                 pairs = []
                 for i, (dets, _) in enumerate(batch_results):
-                    original_frame = item[i] if not prep_needed else item[i][0]
+                    original_frame = data[i] if not prep_needed else data[i][0]
                     total_frames += 1
                     if len(dets) > 0:
                         face_frames += 1
@@ -839,7 +885,7 @@ def video_detect(
                 processing_time += time.time() - t1
 
                 t_put = time.time()
-                det_queue.put(pairs)
+                det_queue.put((batch_id, pairs))  # Include batch_id for ordering
                 queue_put_time = time.time() - t_put
 
                 if not hasattr(cf, '_queue_get_time'):
@@ -1018,6 +1064,9 @@ def parse_cli_args():
         '--draw-scores', default=False, action='store_true',
         help='Draw detection scores onto outputs.')
     parser.add_argument(
+        '--prconf', default=False, action='store_true',
+        help='Draw green bounding boxes with confidence scores on detected faces.')
+    parser.add_argument(
         '--mask-scale', default=1.3, type=float, metavar='M',
         help='Scale factor for face masks, to make sure that masks cover the complete face. Default: 1.3.')
     parser.add_argument(
@@ -1065,12 +1114,14 @@ def parse_cli_args():
     parser.add_argument('--encoder', default='auto',
         choices=['auto'] + VALID_ENCODERS,
         help='Video encoder (default: auto - match source codec). Use libx264 for speed, GPU encoders (h264_nvenc, hevc_nvenc) if available.')
+    parser.add_argument('--sfolder', default=None, metavar='PATH',
+        help='Super folder mode: process all videos in subdirectories. Output to <subfolder>/mosaic/<filename>_msc.<ext>')
 
     args = parser.parse_args()
 
-    if len(args.input) == 0:
+    if len(args.input) == 0 and not args.sfolder:
         parser.print_help()
-        print('\nPlease supply at least one input path.')
+        print('\nPlease supply at least one input path or use --sfolder.')
         exit(1)
 
     if args.input == ['cam']:  # Shortcut for webcam demo with live preview
@@ -1083,9 +1134,44 @@ def parse_cli_args():
 def main():
     args = parse_cli_args()
     ipaths = []
+    output_map = {}  # Map input path to output path for sfolder mode
 
-    # add files in folders
-    for path in args.input:
+    # Super folder mode: process all subdirectories
+    if args.sfolder:
+        sfolder = args.sfolder
+        if not os.path.isdir(sfolder):
+            print(f'Error: --sfolder path does not exist or is not a directory: {sfolder}')
+            return
+
+        print(f'[sfolder] Scanning subdirectories in: {sfolder}')
+        video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v', '.webm')
+
+        for subdir in os.listdir(sfolder):
+            subdir_path = os.path.join(sfolder, subdir)
+            if not os.path.isdir(subdir_path):
+                continue
+
+            # Create output directory
+            mosaic_dir = os.path.join(subdir_path, 'mosaic')
+            os.makedirs(mosaic_dir, exist_ok=True)
+
+            # Collect all videos in this subdirectory
+            for fname in os.listdir(subdir_path):
+                fpath = os.path.join(subdir_path, fname)
+                if os.path.isfile(fpath) and fname.lower().endswith(video_exts):
+                    ipaths.append(fpath)
+                    # Generate output path: subfolder/mosaic/filename_msc.ext
+                    name, ext = os.path.splitext(fname)
+                    opath = os.path.join(mosaic_dir, f'{name}_msc{ext}')
+                    output_map[fpath] = opath
+
+        print(f'[sfolder] Found {len(ipaths)} videos in {len(output_map)} subdirectories')
+        if len(ipaths) == 0:
+            print('[sfolder] No videos found. Exiting.')
+            return
+
+    # Normal mode: add files in folders
+    elif args.input:
         if os.path.isdir(path):
             for file in os.listdir(path):
                 ipaths.append(os.path.join(path,file))
@@ -1127,12 +1213,19 @@ def main():
         ipaths = tqdm.tqdm(ipaths, position=0, dynamic_ncols=True, desc='Batch progress')
 
     for ipath in ipaths:
-        opath = base_opath
+        # In sfolder mode, use pre-defined output path from output_map
+        if args.sfolder and ipath in output_map:
+            opath = output_map[ipath]
+        else:
+            opath = base_opath
+
         if ipath == 'cam':
             ipath = '<video0>'
             enable_preview = True
         filetype = get_file_type(ipath)
         is_cam = filetype == 'cam'
+
+        # Auto-generate output path for normal mode if not specified
         if opath is None and not is_cam:
             root, ext = os.path.splitext(ipath)
             opath = f'{root}_anonymized{ext}'
@@ -1163,6 +1256,7 @@ def main():
                 prep_workers=args.prep_workers,
                 prep_threads=args.prep_threads,
                 infer_threads=args.infer_threads,
+                prconf=args.prconf,
             )
             if result is not None and not is_cam:
                 total_frames, face_frames = result
