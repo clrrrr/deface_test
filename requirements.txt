@@ -12,3 +12,6 @@ onnxruntime-gpu==1.16.3
 
 # GPU management for multi-GPU support
 nvidia-ml-py3>=7.352.0
+
+# Web UI
+gradio>=4.0.0
