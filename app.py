@@ -160,46 +160,51 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     gr.Markdown("# 人脸脱敏工具 v1.0")
 
     with gr.Row():
-        with gr.Column():
-            gr.Markdown("### 输入输出设置")
-            gr.Markdown('<p style="color: gray; font-size: 0.9em; margin-top: -10px;">可拖动输入路径 | 以下两种模式二选一</p>')
-            input_folder = gr.Textbox(label="文件夹路径 (input)", placeholder="处理单个文件夹中的所有视频")
-            sfolder = gr.Textbox(label="母文件夹路径 (sfolder)", placeholder="处理所有子文件夹中的视频")
-            output_path = gr.Textbox(label="保存路径 (output)", placeholder="留空表示原路径")
+        # 左列：所有设置参数 + 操作按钮
+        with gr.Column(scale=3):
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("### 输入输出设置")
+                    gr.Markdown('<p style="color: gray; font-size: 0.9em; margin-top: -10px;">可拖动输入路径 | 以下两种模式二选一</p>')
+                    input_folder = gr.Textbox(label="文件夹路径 (input)", placeholder="处理单个文件夹中的所有视频")
+                    sfolder = gr.Textbox(label="母文件夹路径 (sfolder)", placeholder="处理所有子文件夹中的视频")
+                    output_path = gr.Textbox(label="保存路径 (output)", placeholder="留空表示原路径")
 
-            gr.Markdown("### 检测参数")
-            detector = gr.Radio(["centerface", "scrfd"], value="scrfd", label="检测器 (detector)")
-            thresh = gr.Slider(0.1, 0.9, value=0.5, step=0.05, label="检测阈值 (thresh)")
+                    gr.Markdown("### 检测参数")
+                    detector = gr.Radio(["centerface", "scrfd"], value="scrfd", label="检测器 (detector)")
+                    thresh = gr.Slider(0.1, 0.9, value=0.5, step=0.05, label="检测阈值 (thresh)")
 
-            gr.Markdown("### 处理参数")
-            replacewith = gr.Radio(["blur", "solid", "none", "mosaic"], value="mosaic",
-                                   label="替换方式 (replacewith)")
-            scale = gr.Dropdown(["原尺寸", "640x360", "1280x720"], value="640x360",
-                               label="缩放尺寸 (scale)")
+                    gr.Markdown("### 处理参数")
+                    replacewith = gr.Radio(["blur", "solid", "none", "mosaic"], value="mosaic",
+                                           label="替换方式 (replacewith)")
+                    scale = gr.Dropdown(["原尺寸", "640x360", "1280x720"], value="640x360",
+                                       label="缩放尺寸 (scale)")
 
-        with gr.Column():
-            gr.Markdown("### 性能参数")
-            preset = gr.Dropdown(["ultrafast", "fast", "medium", "slow"], value="ultrafast",
-                                label="编码预设 (preset)")
-            encoder = gr.Textbox(value="libx264", label="编码器 (encoder)")
-            batchsize = gr.Slider(1, 128, value=64, step=1, label="批处理大小 (batchsize)")
-            prefetch = gr.Slider(1, 50, value=20, step=1, label="预取帧数 (prefetch)")
-            prep_workers = gr.Slider(1, 32, value=16, step=1, label="预处理进程数 (prep-workers)")
-            prep_threads = gr.Slider(1, 16, value=2, step=1, label="预处理线程数 (prep-threads)")
-            infer_threads = gr.Slider(1, 32, value=16, step=1, label="推理线程数 (infer-threads)")
-            bitrate_margin = gr.Slider(1.0, 2.0, value=1.10, step=0.05,
-                                      label="码率余量 (bitrate-margin)")
+                with gr.Column():
+                    gr.Markdown("### 性能参数")
+                    preset = gr.Dropdown(["ultrafast", "fast", "medium", "slow"], value="ultrafast",
+                                        label="编码预设 (preset)")
+                    encoder = gr.Textbox(value="libx264", label="编码器 (encoder)")
+                    batchsize = gr.Slider(1, 128, value=64, step=1, label="批处理大小 (batchsize)")
+                    prefetch = gr.Slider(1, 50, value=20, step=1, label="预取帧数 (prefetch)")
+                    prep_workers = gr.Slider(1, 32, value=16, step=1, label="预处理进程数 (prep-workers)")
+                    prep_threads = gr.Slider(1, 16, value=2, step=1, label="预处理线程数 (prep-threads)")
+                    infer_threads = gr.Slider(1, 32, value=16, step=1, label="推理线程数 (infer-threads)")
+                    bitrate_margin = gr.Slider(1.0, 2.0, value=1.10, step=0.05,
+                                              label="码率余量 (bitrate-margin)")
 
-    run_btn = gr.Button("开始处理", variant="primary", size="lg")
-    with gr.Row():
-        stop_btn = gr.Button("停止处理", variant="stop", size="lg")
-        reset_btn = gr.Button("一键重置", variant="secondary", size="lg")
+            run_btn = gr.Button("开始处理", variant="primary", size="lg")
+            with gr.Row():
+                stop_btn = gr.Button("停止处理", variant="stop", size="lg")
+                reset_btn = gr.Button("一键重置", variant="secondary", size="lg")
 
-    gr.Markdown("### 处理进度")
-    status_text = gr.Textbox(label="状态", value="", interactive=False)
-    folder_progress = gr.Textbox(label="文件夹进度", value="", visible=False, interactive=False)
-    video_progress = gr.Textbox(label="当前文件夹内进度", value="", interactive=False)
-    output_log = gr.Textbox(label="日志输出", lines=15, max_lines=20)
+        # 右列：进度与日志，单独成栏，无需滚动即可看到
+        with gr.Column(scale=2):
+            gr.Markdown("### 处理进度")
+            status_text = gr.Textbox(label="状态", value="", interactive=False)
+            folder_progress = gr.Textbox(label="文件夹进度", value="", visible=False, interactive=False)
+            video_progress = gr.Textbox(label="当前文件夹内进度", value="", interactive=False)
+            output_log = gr.Textbox(label="日志输出", lines=28, max_lines=28, autoscroll=True)
 
     run_btn.click(
         process_videos,
