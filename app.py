@@ -58,23 +58,15 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
             gr.Markdown("### 输入输出设置")
             with gr.Row():
                 input_folder = gr.Textbox(label="文件夹路径 (input)", scale=4)
-                input_btn = gr.Button("选择文件夹", scale=1)
+                input_btn = gr.Button("浏览", scale=1)
+            input_explorer = gr.FileExplorer(root_dir="/", file_count="single", visible=False)
+
             with gr.Row():
                 sfolder = gr.Textbox(label="母文件夹路径 (sfolder)", scale=4, placeholder="留空表示处理单个文件夹")
-                sfolder_btn = gr.Button("选择文件夹", scale=1)
+                sfolder_btn = gr.Button("浏览", scale=1)
+            sfolder_explorer = gr.FileExplorer(root_dir="/", file_count="single", visible=False)
+
             output_path = gr.Textbox(label="保存路径 (output)", placeholder="留空表示原路径")
-
-            # Modal窗口 - 输入文件夹
-            with gr.Modal(visible=False) as input_modal:
-                gr.Markdown("### 选择输入文件夹")
-                input_explorer = gr.FileExplorer(root_dir="/", file_count="single")
-                input_confirm = gr.Button("确认", variant="primary")
-
-            # Modal窗口 - 母文件夹
-            with gr.Modal(visible=False) as sfolder_modal:
-                gr.Markdown("### 选择母文件夹")
-                sfolder_explorer = gr.FileExplorer(root_dir="/", file_count="single")
-                sfolder_confirm = gr.Button("确认", variant="primary")
 
             gr.Markdown("### 检测参数")
             detector = gr.Radio(["centerface", "scrfd"], value="scrfd", label="检测器 (detector)")
@@ -105,16 +97,16 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     output_log = gr.Textbox(label="日志输出", lines=15, max_lines=20)
 
     # 事件处理
-    input_btn.click(lambda: gr.update(visible=True), None, input_modal)
-    input_confirm.click(
+    input_btn.click(lambda: gr.update(visible=True), None, input_explorer)
+    input_explorer.change(
         lambda x: (gr.update(value=x if isinstance(x, str) else x[0] if x else ""), gr.update(visible=False)),
-        input_explorer, [input_folder, input_modal]
+        input_explorer, [input_folder, input_explorer]
     )
 
-    sfolder_btn.click(lambda: gr.update(visible=True), None, sfolder_modal)
-    sfolder_confirm.click(
+    sfolder_btn.click(lambda: gr.update(visible=True), None, sfolder_explorer)
+    sfolder_explorer.change(
         lambda x: (gr.update(value=x if isinstance(x, str) else x[0] if x else ""), gr.update(visible=False)),
-        sfolder_explorer, [sfolder, sfolder_modal]
+        sfolder_explorer, [sfolder, sfolder_explorer]
     )
 
     run_btn.click(
