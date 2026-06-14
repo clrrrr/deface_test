@@ -51,15 +51,16 @@ class _ProcState:
             return
         key = _bar_key(seg)
         with self.lock:
+            # "Input:" 可能被 tqdm 进度条(\r 刷新无换行)拼接到同一段里，
+            # 所以无论该段是否是进度条，只要含 Input: 就提取当前文件并重置帧进度。
+            if "Input:" in seg:
+                self.current_file = seg.split("Input:", 1)[1].strip()
+                self.video = ""
             if key == "Batch progress":
                 self.folder = seg
             elif key is not None:
                 self.video = seg
             else:
-                # deface.py 每个视频开头打印 "Input:  <路径>"，借此记录当前文件并重置帧进度
-                if seg.lstrip().startswith("Input:"):
-                    self.current_file = seg.split("Input:", 1)[1].strip()
-                    self.video = ""
                 # 视频总数：分片模式优先用 "[shard] ... handling M videos"，
                 # 否则用 "[sfolder] Found N videos"（仅在分片数未知时）
                 if "shard" in seg and "handling" in seg:
