@@ -103,7 +103,8 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
         current_process.wait()
         current_process = None
 
-        return "", "", "\n".join(output) if output else "处理完成"
+        log = "\n".join(output) if output else "处理完成"
+        return "", "", log
 
     except Exception as e:
         current_process = None
@@ -150,7 +151,7 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
 
     gr.Markdown("### 处理进度")
     status_text = gr.Textbox(label="状态", value="", interactive=False)
-    folder_progress = gr.Textbox(label="文件夹进度", value="", visible=False, interactive=False)
+    folder_progress = gr.Textbox(label="文件夹进度", value="", interactive=False)
     video_progress = gr.Textbox(label="当前文件夹内进度", value="", interactive=False)
     output_log = gr.Textbox(label="日志输出", lines=15, max_lines=20)
 
