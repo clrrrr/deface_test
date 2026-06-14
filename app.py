@@ -7,9 +7,31 @@ import gradio as gr
 import subprocess
 from pathlib import Path
 
+# 全局变量存储当前进程
+current_process = None
+
+def stop_processing():
+    global current_process
+    if current_process:
+        current_process.terminate()
+        return "已发送停止信号"
+    return "没有正在运行的任务"
+
 def process_videos(input_path, sfolder, output_path, detector, thresh, replacewith, scale, preset,
                    encoder, batchsize, prefetch, prep_workers, prep_threads,
-                   infer_threads, bitrate_margin, progress=gr.Progress()):
+                   infer_threads, bitrate_margin):
+
+    # 清理路径首尾空格和file://前缀
+    input_path = input_path.strip() if input_path else ""
+    sfolder = sfolder.strip() if sfolder else ""
+    output_path = output_path.strip() if output_path else ""
+
+    if input_path.startswith("file://"):
+        input_path = input_path[7:]
+    if sfolder.startswith("file://"):
+        sfolder = sfolder[7:]
+    if output_path.startswith("file://"):
+        output_path = output_path[7:]
 
     # 二选一：sfolder模式或普通input模式
     if sfolder:
@@ -36,20 +58,36 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
     cmd.extend(["--bitrate-margin", str(bitrate_margin)])
 
     try:
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, bufsize=1, cwd=os.path.dirname(__file__))
+        global current_process
+        current_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                           text=True, bufsize=1, cwd=os.path.dirname(__file__))
 
         output = []
-        for line in process.stdout:
-            output.append(line)
-            if "Processing" in line or "%" in line:
-                progress(0.5, desc=line.strip())
+        folder_prog = ""
+        video_prog = ""
 
-        process.wait()
-        return "\n".join(output) if output else "处理完成"
+        for line in current_process.stdout:
+            output.append(line)
+            # 解析进度信息 (需要根据deface.py实际输出调整)
+            if "folder" in line.lower() or "subfolder" in line.lower():
+                import re
+                match = re.search(r'(\d+)/(\d+)', line)
+                if match:
+                    folder_prog = f"{match.group(1)}/{match.group(2)}"
+            if "video" in line.lower() or "processing" in line.lower():
+                import re
+                match = re.search(r'(\d+)/(\d+)', line)
+                if match:
+                    video_prog = f"{match.group(1)}/{match.group(2)}"
+
+        current_process.wait()
+        current_process = None
+        log = "\n".join(output) if output else "处理完成"
+        return folder_prog, video_prog, log
 
     except Exception as e:
-        return f"错误: {str(e)}"
+        current_process = None
+        return "", "", f"错误: {str(e)}"
 
 with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     gr.Markdown("# 人脸脱敏工具 v1.0")
@@ -86,16 +124,22 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
                                       label="码率余量 (bitrate-margin)")
 
     run_btn = gr.Button("开始处理", variant="primary", size="lg")
+    stop_btn = gr.Button("停止处理", variant="stop", size="lg")
 
     gr.Markdown("### 处理进度")
+    status_text = gr.Textbox(label="状态", value="", interactive=False)
+    folder_progress = gr.Textbox(label="文件夹进度", value="", visible=False, interactive=False)
+    video_progress = gr.Textbox(label="当前文件夹内进度", value="", interactive=False)
     output_log = gr.Textbox(label="日志输出", lines=15, max_lines=20)
 
     run_btn.click(
         process_videos,
         [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
          encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin],
-        output_log
+        [folder_progress, video_progress, output_log]
     )
+
+    stop_btn.click(stop_processing, None, status_text)
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
