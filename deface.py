@@ -1187,10 +1187,18 @@ def main():
 
     # Normal mode: add files in folders
     elif args.input:
+        video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v', '.webm')
         for path in args.input:
             if os.path.isdir(path):
-                for file in os.listdir(path):
-                    ipaths.append(os.path.join(path, file))
+                # 与 sfolder 一致：输出到 <文件夹>/mosaic/<名>_msc<ext>
+                mosaic_dir = os.path.join(path, 'mosaic')
+                os.makedirs(mosaic_dir, exist_ok=True)
+                for fname in os.listdir(path):
+                    fpath = os.path.join(path, fname)
+                    if os.path.isfile(fpath) and fname.lower().endswith(video_exts):
+                        ipaths.append(fpath)
+                        name, ext = os.path.splitext(fname)
+                        output_map[fpath] = os.path.join(mosaic_dir, f'{name}_msc{ext}')
             else:
                 # Either a path to a regular file, the special 'cam' shortcut
                 # or an invalid path. The latter two cases are handled below.
@@ -1245,8 +1253,8 @@ def main():
         ipaths = tqdm.tqdm(ipaths, position=0, dynamic_ncols=True, desc='Batch progress')
 
     for ipath in ipaths:
-        # In sfolder mode, use pre-defined output path from output_map
-        if args.sfolder and ipath in output_map:
+        # sfolder / 普通文件夹模式都用预生成的 mosaic 输出路径
+        if ipath in output_map:
             opath = output_map[ipath]
         else:
             opath = base_opath
