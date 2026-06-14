@@ -20,23 +20,35 @@ ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 current_process = None
 
 def augment_cuda_path(env):
-    """把 CUDA 的 bin 目录补进子进程 PATH。
-    Windows 上常见：命令行能跑(shell 的 PATH 含 CUDA\\bin)、但 web 拉起的子进程
-    继承的 PATH 不含，导致 onnxruntime-gpu 报 'CUDA_PATH is set but CUDA wasn't able to be loaded'。
-    依据 CUDA_PATH / CUDA_PATH_V* 自动补 bin（含 cuDNN 常见子目录），非 Windows 无副作用。"""
+    """把 CUDA 及 conda 环境的 DLL 目录补进子进程 PATH（仅 Windows）。
+    现象：终端 `python deface.py` 能跑，但 web 拉起的子进程报
+    'CUDA_PATH is set but CUDA wasn't able to be loaded'。
+    根因：onnxruntime-gpu 依赖的 cuDNN/cuBLAS 等 DLL 在 conda 环境的 Library\\bin 里，
+    这些目录是 `conda activate` 才加进 PATH 的；若启动 web 时未激活，子进程就找不到。
+    这里依据正在运行的解释器(sys.executable)推导 conda 环境目录，并补上 CUDA_PATH\\bin，
+    相当于替子进程做一次 activate。非 Windows 直接返回。"""
     if os.name != "nt":
         return
     extra = []
+
+    # 1) conda 环境自身的 DLL 目录（conda activate 会加这些）
+    env_root = os.path.dirname(sys.executable)
+    for sub in ("", r"Library\bin", r"Library\mingw-w64\bin", r"Library\usr\bin",
+                "Scripts", "bin"):
+        extra.append(os.path.join(env_root, sub) if sub else env_root)
+
+    # 2) 系统 CUDA Toolkit 的 bin（CUDA_PATH / CUDA_PATH_V* 派生）
     for k, v in list(env.items()):
-        if k == "CUDA_PATH" or k.startswith("CUDA_PATH_"):
-            if v:
-                extra.append(os.path.join(v, "bin"))
-                # 部分 cuDNN 发行版把 dll 放在 bin\x64 或 lib\x64
-                extra.append(os.path.join(v, "bin", "x64"))
-    if not extra:
-        return
+        if v and (k == "CUDA_PATH" or k.startswith("CUDA_PATH_")):
+            extra.append(os.path.join(v, "bin"))
+            extra.append(os.path.join(v, "bin", "x64"))
+
     cur = env.get("PATH", "")
-    parts = [p for p in extra if os.path.isdir(p) and p not in cur]
+    cur_lower = cur.lower()
+    parts = []
+    for p in extra:
+        if os.path.isdir(p) and p.lower() not in cur_lower:
+            parts.append(p)
     if parts:
         env["PATH"] = os.pathsep.join(parts) + os.pathsep + cur
 
