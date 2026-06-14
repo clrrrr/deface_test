@@ -1127,6 +1127,10 @@ def parse_cli_args():
         help='Video encoder (default: auto - match source codec). Use libx264 for speed, GPU encoders (h264_nvenc, hevc_nvenc) if available.')
     parser.add_argument('--sfolder', default=None, metavar='PATH',
         help='Super folder mode: process all videos in subdirectories. Output to <subfolder>/mosaic/<filename>_msc.<ext>')
+    parser.add_argument('--num-shards', type=int, default=1, metavar='N',
+        help='Split the discovered video list into N shards for multi-process parallelism (default: 1 = no sharding)')
+    parser.add_argument('--shard-id', type=int, default=0, metavar='I',
+        help='Which shard this process handles, 0-based (used with --num-shards). Processes ipaths[shard_id::num_shards]')
 
     args = parser.parse_args()
 
@@ -1190,6 +1194,16 @@ def main():
             # Either a path to a regular file, the special 'cam' shortcut
             # or an invalid path. The latter two cases are handled below.
             ipaths.append(path)
+
+    # Multi-process sharding: each process handles a deterministic subset of the
+    # video list. Sort first so every shard agrees on the same ordering, then take
+    # ipaths[shard_id::num_shards]. Output paths are per-file so shards never overlap.
+    if args.num_shards > 1:
+        ipaths = sorted(ipaths)[args.shard_id::args.num_shards]
+        print(f'[shard] shard {args.shard_id}/{args.num_shards}: handling {len(ipaths)} videos')
+        if len(ipaths) == 0:
+            print('[shard] No videos assigned to this shard. Exiting.')
+            return
 
     
     base_opath = args.output

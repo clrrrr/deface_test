@@ -5,6 +5,8 @@ for key in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY',
 
 import sys
 import re
+import time
+import threading
 import urllib.parse
 import gradio as gr
 import subprocess
@@ -16,8 +18,81 @@ MAX_LOG_LINES = 300
 # 匹配 ANSI 转义控制码（tqdm 在非终端下用于光标定位，会污染日志）
 ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 
-# 全局变量存储当前进程
-current_process = None
+# 全局变量存储当前所有子进程（多进程并行时为多个）
+current_processes = []
+
+def _bar_key(seg):
+    # 是否是 tqdm 进度条行；是则返回其标识（用于区分批次条/帧条），否则 None
+    if "%|" not in seg and "it/s" not in seg:
+        return None
+    m = re.match(r'\s*([^:|%]+):\s', seg)   # 形如 "Batch progress: ..." 的有描述进度条
+    return m.group(1).strip() if m else "__bar__"
+
+def _count_from_bar(seg):
+    # 从进度条文本里抽 "x/y"
+    m = re.search(r'(\d+)/(\d+)', seg or "")
+    return f"{m.group(1)}/{m.group(2)}" if m else ""
+
+class _ProcState:
+    """单个子进程的输出状态：普通日志行 + 批次/帧进度条原文。读取线程写，主线程读。"""
+    def __init__(self, label):
+        self.label = label
+        self.lines = []   # 普通日志行(str)，进度条不进这里
+        self.folder = ""  # 批次进度条原文
+        self.video = ""   # 帧进度条原文
+        self.lock = threading.Lock()
+
+    def add(self, seg):
+        seg = ANSI_RE.sub("", seg).rstrip("\r\n")
+        if seg.strip() == "":
+            return
+        key = _bar_key(seg)
+        with self.lock:
+            if key == "Batch progress":
+                self.folder = seg
+            elif key is not None:
+                self.video = seg
+            else:
+                self.lines.append(seg)
+
+def _reader(proc, st):
+    # 逐字符读取，按 \r / \n 双分隔（兼容 tqdm 同行刷新）
+    cur = ""
+    while True:
+        ch = proc.stdout.read(1)
+        if ch == "":
+            break
+        if ch == "\n" or ch == "\r":
+            st.add(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur:
+        st.add(cur)
+
+def _render_log(states):
+    if len(states) == 1:
+        st = states[0]
+        with st.lock:
+            return "\n".join(st.lines[-MAX_LOG_LINES:])
+    # 多进程：每进程一块，带头部 + 末尾若干行
+    per = max(8, MAX_LOG_LINES // len(states))
+    blocks = []
+    for st in states:
+        with st.lock:
+            tail = list(st.lines[-per:])
+        blocks.append(f"─── {st.label} ───\n" + "\n".join(tail))
+    return "\n\n".join(blocks)
+
+def _render_folder(states):
+    if len(states) == 1:
+        return states[0].folder
+    return "  |  ".join(f"{st.label}: {_count_from_bar(st.folder) or '-'}" for st in states)
+
+def _render_video(states):
+    if len(states) == 1:
+        return states[0].video
+    return "\n".join(f"{st.label}: {_count_from_bar(st.video) or '-'}" for st in states)
 
 def clean_path(p):
     """清理输入路径：去首尾空格/引号；若为浏览器拖拽的 file:// URL，则剥前缀并做 URL 解码。
@@ -36,17 +111,25 @@ def clean_path(p):
     return p
 
 def stop_processing():
-    global current_process
-    if current_process:
-        current_process.terminate()
-        return "已发送停止信号"
+    global current_processes
+    if current_processes:
+        n = len(current_processes)
+        for p in current_processes:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        return f"已发送停止信号（{n} 个进程）"
     return "没有正在运行的任务"
 
 def reset_all():
-    global current_process
-    if current_process:
-        current_process.terminate()
-        current_process = None
+    global current_processes
+    for p in current_processes:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    current_processes = []
     # 返回所有组件的默认值
     return (
         "",  # input_folder
@@ -61,6 +144,7 @@ def reset_all():
         2,  # prep_threads
         16,  # infer_threads
         1.10,  # bitrate_margin
+        4,  # num_processes
         "",  # folder_progress
         "",  # video_progress
         "已重置所有设置"  # output_log
@@ -68,7 +152,7 @@ def reset_all():
 
 def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
                    batchsize, prefetch, prep_workers, prep_threads,
-                   infer_threads, bitrate_margin):
+                   infer_threads, bitrate_margin, num_processes):
     # 固定默认值（界面已隐藏这些选项）
     replacewith = "mosaic"
     preset = "ultrafast"
@@ -82,93 +166,77 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
     # 二选一：sfolder模式或普通input模式
     # 用 -u 关闭子进程缓冲，否则 tqdm/print 会被缓存、日志不实时
     if sfolder:
-        cmd = [sys.executable, "-u", "deface.py", "--sfolder", sfolder]
+        base_cmd = [sys.executable, "-u", "deface.py", "--sfolder", sfolder]
     elif input_path:
-        cmd = [sys.executable, "-u", "deface.py", input_path]
+        base_cmd = [sys.executable, "-u", "deface.py", input_path]
     else:
         yield "", "", "请选择输入模式：普通文件夹或母文件夹"
         return
 
     if output_path:
-        cmd.extend(["--output", output_path])
-    cmd.extend(["--detector", detector])
-    cmd.extend(["--thresh", str(thresh)])
-    cmd.extend(["--replacewith", replacewith])
+        base_cmd.extend(["--output", output_path])
+    base_cmd.extend(["--detector", detector])
+    base_cmd.extend(["--thresh", str(thresh)])
+    base_cmd.extend(["--replacewith", replacewith])
     if scale and scale != "原尺寸":
-        cmd.extend(["--scale", scale])
-    cmd.extend(["--preset", preset])
-    cmd.extend(["--encoder", encoder])
-    cmd.extend(["--batchsize", str(batchsize)])
-    cmd.extend(["--prefetch", str(prefetch)])
-    cmd.extend(["--prep-workers", str(prep_workers)])
-    cmd.extend(["--prep-threads", str(prep_threads)])
-    cmd.extend(["--infer-threads", str(infer_threads)])
-    cmd.extend(["--bitrate-margin", str(bitrate_margin)])
+        base_cmd.extend(["--scale", scale])
+    base_cmd.extend(["--preset", preset])
+    base_cmd.extend(["--encoder", encoder])
+    base_cmd.extend(["--batchsize", str(batchsize)])
+    base_cmd.extend(["--prefetch", str(prefetch)])
+    base_cmd.extend(["--prep-workers", str(prep_workers)])
+    base_cmd.extend(["--prep-threads", str(prep_threads)])
+    base_cmd.extend(["--infer-threads", str(infer_threads)])
+    base_cmd.extend(["--bitrate-margin", str(bitrate_margin)])
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
-    folder_prog = ""
-    video_prog = ""
-    lines = []   # 每项为 (bar_key, 文本)；bar_key 为 None 表示普通日志行
-
-    def render():
-        return "\n".join(t for _, t in lines[-MAX_LOG_LINES:])
-
-    def bar_key(seg):
-        # 是否是 tqdm 进度条行；是则返回其标识（用于判断"同一个条"），否则 None
-        if "%|" not in seg and "it/s" not in seg:
-            return None
-        m = re.match(r'\s*([^:|%]+):\s', seg)   # 形如 "Batch progress: ..." 的有描述进度条
-        return m.group(1).strip() if m else "__bar__"
-
-    def add_segment(seg):
-        # 处理一个以 \r 或 \n 分隔出的片段：去掉 ANSI 码。
-        # tqdm 进度条 -> 只更新右侧独立进度框（天生原地刷新）；普通日志 -> 追加到日志框
-        nonlocal folder_prog, video_prog
-        seg = ANSI_RE.sub("", seg).rstrip("\r\n")
-        if seg.strip() == "":
-            return
-        key = bar_key(seg)
-        if key == "Batch progress":
-            folder_prog = seg
-        elif key is not None:
-            video_prog = seg
-        else:
-            lines.append((None, seg))
+    # 多进程分片：仅 sfolder 母文件夹模式 + 进程数>1 时启用（按视频分片）
+    n = max(1, int(num_processes))
+    if n > 1 and sfolder:
+        cmds = [(f"进程{i}", base_cmd + ["--num-shards", str(n), "--shard-id", str(i)])
+                for i in range(n)]
+    else:
+        cmds = [("进程0", base_cmd)]
 
     try:
-        global current_process
-        current_process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, cwd=os.path.dirname(__file__), env=env,
-        )
+        global current_processes
+        current_processes = []
+        states = []
+        threads = []
+        for label, cmd in cmds:
+            p = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, cwd=os.path.dirname(__file__), env=env,
+            )
+            current_processes.append(p)
+            st = _ProcState(label)
+            st.lines.append(f"启动中：{' '.join(cmd)}")
+            states.append(st)
+            t = threading.Thread(target=_reader, args=(p, st), daemon=True)
+            t.start()
+            threads.append(t)
 
-        lines.append((None, f"启动中：{' '.join(cmd)}"))
-        yield folder_prog, video_prog, render()
-
-        cur = ""
+        # 周期性产出合并视图（多进程下避免逐字符 yield 过于频繁）
         while True:
-            ch = current_process.stdout.read(1)
-            if ch == "":
+            alive = any(t.is_alive() for t in threads)
+            yield _render_folder(states), _render_video(states), _render_log(states)
+            if not alive:
                 break
-            if ch == "\n" or ch == "\r":
-                add_segment(cur)
-                cur = ""
-                yield folder_prog, video_prog, render()
-            else:
-                cur += ch
+            time.sleep(0.3)
 
-        if cur:
-            add_segment(cur)
-
-        current_process.wait()
-        current_process = None
-        yield folder_prog, video_prog, render() or "处理完成"
+        for p in current_processes:
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                pass
+        current_processes = []
+        yield _render_folder(states), _render_video(states), _render_log(states) or "处理完成"
 
     except Exception as e:
-        current_process = None
-        yield folder_prog, video_prog, f"错误: {str(e)}"
+        current_processes = []
+        yield "", "", f"错误: {str(e)}"
 
 with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     gr.Markdown("# 人脸脱敏工具 v1.0")
@@ -194,6 +262,8 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
 
                 with gr.Column():
                     gr.Markdown("### 性能参数")
+                    num_processes = gr.Slider(1, 8, value=4, step=1, label="并行进程数 (processes)",
+                                              info="仅母文件夹(sfolder)模式生效：按视频分给多个进程并行，吃满多核+GPU。视频数≥进程数才有效")
                     batchsize = gr.Slider(1, 128, value=64, step=1, label="批处理大小 (batchsize)")
                     prefetch = gr.Slider(1, 50, value=20, step=1, label="预取帧数 (prefetch)")
                     prep_workers = gr.Slider(1, 32, value=16, step=1, label="预处理进程数 (prep-workers)")
@@ -217,7 +287,7 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     run_btn.click(
         process_videos,
         [input_folder, sfolder, output_path, detector, thresh, scale,
-         batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin],
+         batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin, num_processes],
         [folder_progress, video_progress, output_log]
     )
 
@@ -227,7 +297,7 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
         reset_all,
         None,
         [input_folder, sfolder, output_path, detector, thresh, scale,
-         batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin,
+         batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin, num_processes,
          folder_progress, video_progress, output_log]
     )
 
