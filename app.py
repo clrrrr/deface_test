@@ -34,12 +34,13 @@ def _count_from_bar(seg):
     return f"{m.group(1)}/{m.group(2)}" if m else ""
 
 class _ProcState:
-    """单个子进程的输出状态：普通日志行 + 批次/帧进度条原文。读取线程写，主线程读。"""
+    """单个子进程的输出状态：普通日志行 + 批次/帧进度条原文 + 当前处理的文件。读取线程写，主线程读。"""
     def __init__(self, label):
         self.label = label
-        self.lines = []   # 普通日志行(str)，进度条不进这里
-        self.folder = ""  # 批次进度条原文
-        self.video = ""   # 帧进度条原文
+        self.lines = []        # 普通日志行(str)，进度条不进这里
+        self.folder = ""       # 批次进度条原文
+        self.video = ""        # 帧进度条原文
+        self.current_file = "" # 当前正在处理的视频(带路径)
         self.lock = threading.Lock()
 
     def add(self, seg):
@@ -53,6 +54,10 @@ class _ProcState:
             elif key is not None:
                 self.video = seg
             else:
+                # deface.py 每个视频开头打印 "Input:  <路径>"，借此记录当前文件并重置帧进度
+                if seg.lstrip().startswith("Input:"):
+                    self.current_file = seg.split("Input:", 1)[1].strip()
+                    self.video = ""
                 self.lines.append(seg)
 
 def _reader(proc, st):
@@ -90,9 +95,16 @@ def _render_folder(states):
     return "  |  ".join(f"{st.label}: {_count_from_bar(st.folder) or '-'}" for st in states)
 
 def _render_video(states):
-    if len(states) == 1:
-        return states[0].video
-    return "\n".join(f"{st.label}: {_count_from_bar(st.video) or '-'}" for st in states)
+    # 每个进程显示两行：当前文件(带路径) + 帧进度，便于查看正在处理谁
+    out = []
+    for st in states:
+        f = st.current_file or "-"
+        c = _count_from_bar(st.video) or "-"
+        if len(states) == 1:
+            out.append(f"{f}\n{c}")
+        else:
+            out.append(f"{st.label}: {f}\n    {c}")
+    return "\n".join(out)
 
 def clean_path(p):
     """清理输入路径：去首尾空格/引号；若为浏览器拖拽的 file:// URL，则剥前缀并做 URL 解码。
@@ -281,7 +293,8 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
         with gr.Column(scale=2):
             gr.Markdown("### 处理进度")
             folder_progress = gr.Textbox(label="文件夹进度 (批次)", value="", interactive=False)
-            video_progress = gr.Textbox(label="当前视频进度", value="", interactive=False)
+            video_progress = gr.Textbox(label="当前视频进度", value="", interactive=False,
+                                        lines=8, max_lines=18)
             output_log = gr.Textbox(label="日志输出", lines=28, max_lines=28, autoscroll=True)
 
     run_btn.click(
