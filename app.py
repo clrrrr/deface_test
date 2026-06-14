@@ -289,8 +289,8 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
         current_processes = []
         yield "", "", f"错误: {str(e)}"
 
-with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
-    gr.Markdown("# 人脸脱敏工具 v1.0")
+with gr.Blocks(title="人脸脱敏工具v2.0") as demo:
+    gr.Markdown("# 人脸脱敏工具 v2.0")
 
     with gr.Row():
         # 左列：所有设置参数 + 操作按钮
