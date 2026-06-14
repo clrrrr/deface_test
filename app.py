@@ -12,6 +12,9 @@ from pathlib import Path
 # 日志框最多保留的行数（避免长视频日志无限增长拖慢界面）
 MAX_LOG_LINES = 300
 
+# 匹配 ANSI 转义控制码（tqdm 在非终端下用于光标定位，会污染日志）
+ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+
 # 全局变量存储当前进程
 current_process = None
 
@@ -97,26 +100,32 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
 
     folder_prog = ""
     video_prog = ""
-    lines = []        # 已完成的整行（以 \n 结尾）
-    cur = ""          # 当前正在刷新的行（tqdm 用 \r 在此行上反复刷新）
+    lines = []   # 每项为 (bar_key, 文本)；bar_key 为 None 表示普通日志行
 
     def render():
-        # 已完成行 + 当前刷新行，取末尾若干行显示
-        shown = lines[-MAX_LOG_LINES:]
-        body = "\n".join(shown)
-        if cur:
-            body = (body + "\n" + cur) if body else cur
-        return body
+        return "\n".join(t for _, t in lines[-MAX_LOG_LINES:])
 
-    def parse_progress(text):
+    def bar_key(seg):
+        # 是否是 tqdm 进度条行；是则返回其标识（用于判断"同一个条"），否则 None
+        if "%|" not in seg and "it/s" not in seg:
+            return None
+        m = re.match(r'\s*([^:|%]+):\s', seg)   # 形如 "Batch progress: ..." 的有描述进度条
+        return m.group(1).strip() if m else "__bar__"
+
+    def add_segment(seg):
+        # 处理一个以 \r 或 \n 分隔出的片段：去掉 ANSI 码。
+        # tqdm 进度条 -> 只更新右侧独立进度框（天生原地刷新）；普通日志 -> 追加到日志框
         nonlocal folder_prog, video_prog
-        m = re.search(r'(\d+)/(\d+)', text)
-        if not m:
+        seg = ANSI_RE.sub("", seg).rstrip("\r\n")
+        if seg.strip() == "":
             return
-        if "Batch progress" in text:
-            folder_prog = f"{m.group(1)}/{m.group(2)}"
-        elif "%|" in text:  # tqdm 帧进度条
-            video_prog = f"{m.group(1)}/{m.group(2)}"
+        key = bar_key(seg)
+        if key == "Batch progress":
+            folder_prog = seg
+        elif key is not None:
+            video_prog = seg
+        else:
+            lines.append((None, seg))
 
     try:
         global current_process
@@ -125,28 +134,23 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
             text=True, bufsize=1, cwd=os.path.dirname(__file__), env=env,
         )
 
-        yield folder_prog, video_prog, f"启动中：{' '.join(cmd)}\n"
+        lines.append((None, f"启动中：{' '.join(cmd)}"))
+        yield folder_prog, video_prog, render()
 
-        # 逐字符读取，按 \r / \n 双分隔，才能吃到 tqdm 的同行刷新
+        cur = ""
         while True:
             ch = current_process.stdout.read(1)
             if ch == "":
                 break
-            if ch == "\n":
-                lines.append(cur)
-                parse_progress(cur)
+            if ch == "\n" or ch == "\r":
+                add_segment(cur)
                 cur = ""
                 yield folder_prog, video_prog, render()
-            elif ch == "\r":
-                # tqdm 回车刷新：解析后把当前行交给显示，再清空等待新内容覆盖
-                parse_progress(cur)
-                yield folder_prog, video_prog, render()
-                cur = ""
             else:
                 cur += ch
 
         if cur:
-            lines.append(cur)
+            add_segment(cur)
 
         current_process.wait()
         current_process = None
@@ -202,8 +206,8 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
         with gr.Column(scale=2):
             gr.Markdown("### 处理进度")
             status_text = gr.Textbox(label="状态", value="", interactive=False)
-            folder_progress = gr.Textbox(label="文件夹进度", value="", visible=False, interactive=False)
-            video_progress = gr.Textbox(label="当前文件夹内进度", value="", interactive=False)
+            folder_progress = gr.Textbox(label="文件夹进度 (批次)", value="", interactive=False)
+            video_progress = gr.Textbox(label="当前视频进度", value="", interactive=False)
             output_log = gr.Textbox(label="日志输出", lines=28, max_lines=28, autoscroll=True)
 
     run_btn.click(
