@@ -56,8 +56,10 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     with gr.Row():
         with gr.Column():
             gr.Markdown("### 输入输出设置")
-            input_folder = gr.Textbox(label="文件夹路径 (input)", placeholder="输入视频文件夹路径")
-            sfolder = gr.Textbox(label="母文件夹路径 (sfolder)", placeholder="留空表示处理单个文件夹")
+            input_folder = gr.FileExplorer(label="文件夹路径 (input)", file_count="single",
+                                          root_dir="/", glob="**/*")
+            sfolder = gr.FileExplorer(label="母文件夹路径 (sfolder)", file_count="single",
+                                     root_dir="/", glob="**/*")
             output_path = gr.Textbox(label="保存路径 (output)", placeholder="留空表示原路径")
 
             gr.Markdown("### 检测参数")
