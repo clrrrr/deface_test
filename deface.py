@@ -1187,13 +1187,14 @@ def main():
 
     # Normal mode: add files in folders
     elif args.input:
-        if os.path.isdir(path):
-            for file in os.listdir(path):
-                ipaths.append(os.path.join(path,file))
-        else:
-            # Either a path to a regular file, the special 'cam' shortcut
-            # or an invalid path. The latter two cases are handled below.
-            ipaths.append(path)
+        for path in args.input:
+            if os.path.isdir(path):
+                for file in os.listdir(path):
+                    ipaths.append(os.path.join(path, file))
+            else:
+                # Either a path to a regular file, the special 'cam' shortcut
+                # or an invalid path. The latter two cases are handled below.
+                ipaths.append(path)
 
     # Multi-process sharding: each process handles a deterministic subset of the
     # video list. Sort first so every shard agrees on the same ordering, then take
