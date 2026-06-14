@@ -37,7 +37,7 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
 
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, buffers=1, cwd=os.path.dirname(__file__))
+                                   text=True, bufsize=1, cwd=os.path.dirname(__file__))
 
         output = []
         for line in process.stdout:
