@@ -37,12 +37,13 @@ def process_videos(sfolder, detector, thresh, replacewith, scale, preset,
         output = []
         for line in process.stdout:
             output.append(line)
+            yield "\n".join(output)
 
         process.wait()
-        return "\n".join(output) if output else "处理完成"
+        yield "\n".join(output) if output else "处理完成"
 
     except Exception as e:
-        return f"错误: {str(e)}"
+        yield f"错误: {str(e)}"
 
 with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     gr.Markdown("# 人脸脱敏工具 v1.0")
