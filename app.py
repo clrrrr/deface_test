@@ -102,7 +102,7 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
 
         for line in current_process.stdout:
             output.append(line)
-            # 解析进度信息 (需要根据deface.py实际输出调整)
+            # 解析进度信息
             if "folder" in line.lower() or "subfolder" in line.lower():
                 import re
                 match = re.search(r'(\d+)/(\d+)', line)
