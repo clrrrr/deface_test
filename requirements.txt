@@ -17,7 +17,11 @@ onnxruntime-gpu>=1.16.3
 # GPU management for multi-GPU support
 nvidia-ml-py3>=7.352.0
 
-# Web UI
-gradio>=4.0.0,<5.0.0
-# huggingface_hub 1.0 移除了 HfFolder，旧版 gradio 仍依赖它，必须钉在 1.0 以下
-huggingface_hub>=0.19,<1.0
+# Web UI —— 钉到已验证可用的版本栈。
+# 教训：只钉 gradio 不钉 starlette/fastapi 会版本错位（旧 gradio + 新 starlette
+# 导致 jinja2 "unhashable type: dict" / "localhost not accessible" 崩溃），故整套钉死。
+gradio==6.18.0
+gradio_client==2.5.0
+fastapi==0.136.3
+starlette==1.3.1
+huggingface_hub==1.19.0
