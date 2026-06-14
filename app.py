@@ -21,8 +21,59 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
                    encoder, batchsize, prefetch, prep_workers, prep_threads,
                    infer_threads, bitrate_margin):
 
-    # 测试：先返回一个简单字符串，确认输出能否显示
-    return "测试输出：函数已被调用\n\n路径信息：\ninput_path=" + str(input_path) + "\nsfolder=" + str(sfolder)
+    # 清理路径
+    input_path = input_path.strip() if input_path else ""
+    sfolder = sfolder.strip() if sfolder else ""
+    output_path = output_path.strip() if output_path else ""
+
+    if input_path.startswith("file://"):
+        input_path = input_path[7:]
+    if sfolder.startswith("file://"):
+        sfolder = sfolder[7:]
+    if output_path.startswith("file://"):
+        output_path = output_path[7:]
+
+    input_path = unquote(input_path)
+    sfolder = unquote(sfolder)
+    output_path = unquote(output_path)
+
+    # 构建命令
+    if sfolder:
+        cmd = ["python", "deface.py", "--sfolder", sfolder]
+    elif input_path:
+        cmd = ["python", "deface.py", input_path]
+    else:
+        return "请选择输入模式"
+
+    if output_path:
+        cmd.extend(["--output", output_path])
+    cmd.extend(["--detector", detector])
+    cmd.extend(["--thresh", str(thresh)])
+    cmd.extend(["--replacewith", replacewith])
+    if scale and scale != "原尺寸":
+        cmd.extend(["--scale", scale])
+    cmd.extend(["--preset", preset])
+    cmd.extend(["--encoder", encoder])
+    cmd.extend(["--batchsize", str(batchsize)])
+    cmd.extend(["--prefetch", str(prefetch)])
+    cmd.extend(["--prep-workers", str(prep_workers)])
+    cmd.extend(["--prep-threads", str(prep_threads)])
+    cmd.extend(["--infer-threads", str(infer_threads)])
+    cmd.extend(["--bitrate-margin", str(bitrate_margin)])
+
+    # 显示命令
+    log = "执行命令:\n" + " ".join(cmd) + "\n\n" + "="*60 + "\n\n"
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+
+        log += "标准输出:\n" + (result.stdout if result.stdout else "(无)\n")
+        log += "\n标准错误:\n" + (result.stderr if result.stderr else "(无)\n")
+        log += f"\n退出码: {result.returncode}"
+
+        return log
+    except Exception as e:
+        return log + f"\n\n执行异常: {str(e)}"
 
     # 清理路径
     input_path = input_path.strip() if input_path else ""
