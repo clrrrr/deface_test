@@ -47,10 +47,9 @@ def reset_all():
         2,  # prep_threads
         16,  # infer_threads
         1.10,  # bitrate_margin
-        "已重置所有设置",  # status_text
         "",  # folder_progress
         "",  # video_progress
-        ""  # output_log
+        "已重置所有设置"  # output_log
     )
 
 def process_videos(input_path, sfolder, output_path, detector, thresh, replacewith, scale, preset,
@@ -205,7 +204,6 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
         # 右列：进度与日志，单独成栏，无需滚动即可看到
         with gr.Column(scale=2):
             gr.Markdown("### 处理进度")
-            status_text = gr.Textbox(label="状态", value="", interactive=False)
             folder_progress = gr.Textbox(label="文件夹进度 (批次)", value="", interactive=False)
             video_progress = gr.Textbox(label="当前视频进度", value="", interactive=False)
             output_log = gr.Textbox(label="日志输出", lines=28, max_lines=28, autoscroll=True)
@@ -217,14 +215,14 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
         [folder_progress, video_progress, output_log]
     )
 
-    stop_btn.click(stop_processing, None, status_text)
+    stop_btn.click(stop_processing, None, output_log)
 
     reset_btn.click(
         reset_all,
         None,
         [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
          encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin,
-         status_text, folder_progress, video_progress, output_log]
+         folder_progress, video_progress, output_log]
     )
 
 if __name__ == "__main__":
