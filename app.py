@@ -8,49 +8,20 @@ import subprocess
 from pathlib import Path
 from urllib.parse import unquote
 
-# 全局变量存储当前进程
-current_process = None
+# 全局变量存储当前进程（简化版不需要）
 
 def stop_processing():
-    global current_process
-    if current_process:
-        current_process.terminate()
-        return "已发送停止信号"
-    return "没有正在运行的任务"
+    return "停止功能暂不可用（已简化）"
 
 def reset_all():
-    global current_process
-    if current_process:
-        current_process.terminate()
-        current_process = None
-    # 返回所有组件的默认值
-    return (
-        "",  # input_folder
-        "",  # sfolder
-        "",  # output_path
-        "scrfd",  # detector
-        0.5,  # thresh
-        "mosaic",  # replacewith
-        "640x360",  # scale
-        "ultrafast",  # preset
-        "libx264",  # encoder
-        64,  # batchsize
-        20,  # prefetch
-        16,  # prep_workers
-        2,  # prep_threads
-        16,  # infer_threads
-        1.10,  # bitrate_margin
-        "已重置所有设置",  # status_text
-        "",  # folder_progress
-        "",  # video_progress
-        ""  # output_log
-    )
+    return ("", "", "", "scrfd", 0.5, "mosaic", "640x360", "ultrafast", "libx264",
+            64, 20, 16, 2, 16, 1.10, "")
 
 def process_videos(input_path, sfolder, output_path, detector, thresh, replacewith, scale, preset,
                    encoder, batchsize, prefetch, prep_workers, prep_threads,
                    infer_threads, bitrate_margin):
 
-    # 清理路径首尾空格和file://前缀
+    # 清理路径
     input_path = input_path.strip() if input_path else ""
     sfolder = sfolder.strip() if sfolder else ""
     output_path = output_path.strip() if output_path else ""
@@ -62,18 +33,17 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
     if output_path.startswith("file://"):
         output_path = output_path[7:]
 
-    # URL解码（处理中文路径）
     input_path = unquote(input_path)
     sfolder = unquote(sfolder)
     output_path = unquote(output_path)
 
-    # 二选一：sfolder模式或普通input模式
+    # 构建命令
     if sfolder:
         cmd = ["python", "deface.py", "--sfolder", sfolder]
     elif input_path:
         cmd = ["python", "deface.py", input_path]
     else:
-        return "请选择输入模式：普通文件夹或母文件夹"
+        return "请选择输入模式"
 
     if output_path:
         cmd.extend(["--output", output_path])
@@ -92,23 +62,10 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
     cmd.extend(["--bitrate-margin", str(bitrate_margin)])
 
     try:
-        global current_process
-
-        # 显示即将执行的命令（调试用）
-        cmd_str = " ".join(cmd)
-        debug_info = f"执行命令：{cmd_str}\n\n{'='*50}\n\n"
-
-        # 直接运行并获取输出
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
-
-        output = debug_info + result.stdout + result.stderr
-        current_process = None
-
-        return "", "", output if output else "处理完成"
-
+        return result.stdout + result.stderr if (result.stdout or result.stderr) else "处理完成"
     except Exception as e:
-        current_process = None
-        return "", "", f"错误: {str(e)}"
+        return f"错误: {str(e)}"
 
 with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     gr.Markdown("# 人脸脱敏工具 v1.0")
@@ -150,27 +107,18 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
         reset_btn = gr.Button("一键重置", variant="secondary", size="lg")
 
     gr.Markdown("### 处理进度")
-    status_text = gr.Textbox(label="状态", value="", interactive=False)
-    folder_progress = gr.Textbox(label="文件夹进度", value="", interactive=False)
-    video_progress = gr.Textbox(label="当前文件夹内进度", value="", interactive=False)
-    output_log = gr.Textbox(label="日志输出", lines=15, max_lines=20)
+    output_log = gr.Textbox(label="日志输出", lines=20, max_lines=30)
 
-    run_btn.click(
-        process_videos,
-        [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
-         encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin],
-        [folder_progress, video_progress, output_log]
-    )
+    run_btn.click(process_videos,
+                  [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
+                   encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin],
+                  output_log)
 
-    stop_btn.click(stop_processing, None, status_text)
+    stop_btn.click(stop_processing, None, output_log)
 
-    reset_btn.click(
-        reset_all,
-        None,
-        [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
-         encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin,
-         status_text, folder_progress, video_progress, output_log]
-    )
+    reset_btn.click(reset_all, None,
+                    [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
+                     encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin, output_log])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
