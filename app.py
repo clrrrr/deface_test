@@ -19,6 +19,27 @@ ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 # 全局变量存储当前进程
 current_process = None
 
+def augment_cuda_path(env):
+    """把 CUDA 的 bin 目录补进子进程 PATH。
+    Windows 上常见：命令行能跑(shell 的 PATH 含 CUDA\\bin)、但 web 拉起的子进程
+    继承的 PATH 不含，导致 onnxruntime-gpu 报 'CUDA_PATH is set but CUDA wasn't able to be loaded'。
+    依据 CUDA_PATH / CUDA_PATH_V* 自动补 bin（含 cuDNN 常见子目录），非 Windows 无副作用。"""
+    if os.name != "nt":
+        return
+    extra = []
+    for k, v in list(env.items()):
+        if k == "CUDA_PATH" or k.startswith("CUDA_PATH_"):
+            if v:
+                extra.append(os.path.join(v, "bin"))
+                # 部分 cuDNN 发行版把 dll 放在 bin\x64 或 lib\x64
+                extra.append(os.path.join(v, "bin", "x64"))
+    if not extra:
+        return
+    cur = env.get("PATH", "")
+    parts = [p for p in extra if os.path.isdir(p) and p not in cur]
+    if parts:
+        env["PATH"] = os.pathsep.join(parts) + os.pathsep + cur
+
 def clean_path(p):
     """清理输入路径：去首尾空格/引号；若为浏览器拖拽的 file:// URL，则剥前缀并做 URL 解码。
     兼容 Windows 与 Linux：
@@ -107,6 +128,7 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    augment_cuda_path(env)
 
     folder_prog = ""
     video_prog = ""
