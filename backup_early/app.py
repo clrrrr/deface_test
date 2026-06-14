@@ -37,8 +37,6 @@ def process_videos(sfolder, detector, thresh, replacewith, scale, preset,
         output = []
         for line in process.stdout:
             output.append(line)
-            if "Processing" in line or "%" in line:
-                progress(0.5, desc=line.strip())
 
         process.wait()
         return "\n".join(output) if output else "处理完成"
