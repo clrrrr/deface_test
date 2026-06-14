@@ -11,15 +11,16 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
                    encoder, batchsize, prefetch, prep_workers, prep_threads,
                    infer_threads, bitrate_margin, progress=gr.Progress()):
 
-    if not input_path:
-        return "请选择输入文件夹"
-
-    cmd = ["python", "deface.py", input_path]
+    # 二选一：sfolder模式或普通input模式
+    if sfolder:
+        cmd = ["python", "deface.py", "--sfolder", sfolder]
+    elif input_path:
+        cmd = ["python", "deface.py", input_path]
+    else:
+        return "请选择输入模式：普通文件夹或母文件夹"
 
     if output_path:
         cmd.extend(["--output", output_path])
-    if sfolder:
-        cmd.extend(["--sfolder", sfolder])
     cmd.extend(["--detector", detector])
     cmd.extend(["--thresh", str(thresh)])
     cmd.extend(["--replacewith", replacewith])
@@ -56,9 +57,9 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     with gr.Row():
         with gr.Column():
             gr.Markdown("### 输入输出设置")
-            gr.Markdown('<p style="color: gray; font-size: 0.9em; margin-top: -10px;">可拖动输入路径</p>')
-            input_folder = gr.Textbox(label="文件夹路径 (input)", placeholder="输入视频文件夹路径")
-            sfolder = gr.Textbox(label="母文件夹路径 (sfolder)", placeholder="留空表示处理单个文件夹")
+            gr.Markdown('<p style="color: gray; font-size: 0.9em; margin-top: -10px;">可拖动输入路径 | 以下两种模式二选一</p>')
+            input_folder = gr.Textbox(label="文件夹路径 (input)", placeholder="处理单个文件夹中的所有视频")
+            sfolder = gr.Textbox(label="母文件夹路径 (sfolder)", placeholder="处理所有子文件夹中的视频")
             output_path = gr.Textbox(label="保存路径 (output)", placeholder="留空表示原路径")
 
             gr.Markdown("### 检测参数")
