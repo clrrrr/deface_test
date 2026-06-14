@@ -21,6 +21,9 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
                    encoder, batchsize, prefetch, prep_workers, prep_threads,
                    infer_threads, bitrate_margin):
 
+    # 测试：先返回一个简单字符串，确认输出能否显示
+    return "测试输出：函数已被调用\n\n路径信息：\ninput_path=" + str(input_path) + "\nsfolder=" + str(sfolder)
+
     # 清理路径
     input_path = input_path.strip() if input_path else ""
     sfolder = sfolder.strip() if sfolder else ""
