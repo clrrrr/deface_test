@@ -8,7 +8,11 @@ scikit-image>=0.19
 
 # ONNX runtime backend (required). Falls back to OpenCV DNN if missing.
 onnx>=1.14
-onnxruntime-gpu==1.16.3
+# 不要硬钉版本：需与显卡/CUDA 匹配。
+#   - 老卡 + CUDA 11.8：onnxruntime-gpu 1.16.x 可用
+#   - RTX 50 系(Blackwell, sm_120)：必须 CUDA 12.8+ 构建，用最新版 onnxruntime-gpu
+# 用 >= 避免 pip install -r 把已装的较新版本强行降级。
+onnxruntime-gpu>=1.16.3
 
 # GPU management for multi-GPU support
 nvidia-ml-py3>=7.352.0
