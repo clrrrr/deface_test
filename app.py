@@ -6,22 +6,50 @@ for key in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY',
 import gradio as gr
 import subprocess
 from pathlib import Path
-from urllib.parse import unquote
 
-# 全局变量存储当前进程（简化版不需要）
+# 全局变量存储当前进程
+current_process = None
 
 def stop_processing():
-    return "停止功能暂不可用（已简化）"
+    global current_process
+    if current_process:
+        current_process.terminate()
+        return "已发送停止信号"
+    return "没有正在运行的任务"
 
 def reset_all():
-    return ("", "", "", "scrfd", 0.5, "mosaic", "640x360", "ultrafast", "libx264",
-            64, 20, 16, 2, 16, 1.10, "")
+    global current_process
+    if current_process:
+        current_process.terminate()
+        current_process = None
+    # 返回所有组件的默认值
+    return (
+        "",  # input_folder
+        "",  # sfolder
+        "",  # output_path
+        "scrfd",  # detector
+        0.5,  # thresh
+        "mosaic",  # replacewith
+        "640x360",  # scale
+        "ultrafast",  # preset
+        "libx264",  # encoder
+        64,  # batchsize
+        20,  # prefetch
+        16,  # prep_workers
+        2,  # prep_threads
+        16,  # infer_threads
+        1.10,  # bitrate_margin
+        "已重置所有设置",  # status_text
+        "",  # folder_progress
+        "",  # video_progress
+        ""  # output_log
+    )
 
 def process_videos(input_path, sfolder, output_path, detector, thresh, replacewith, scale, preset,
                    encoder, batchsize, prefetch, prep_workers, prep_threads,
                    infer_threads, bitrate_margin):
 
-    # 清理路径
+    # 清理路径首尾空格和file://前缀
     input_path = input_path.strip() if input_path else ""
     sfolder = sfolder.strip() if sfolder else ""
     output_path = output_path.strip() if output_path else ""
@@ -33,79 +61,13 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
     if output_path.startswith("file://"):
         output_path = output_path[7:]
 
-    input_path = unquote(input_path)
-    sfolder = unquote(sfolder)
-    output_path = unquote(output_path)
-
-    # 构建命令
+    # 二选一：sfolder模式或普通input模式
     if sfolder:
         cmd = ["python", "deface.py", "--sfolder", sfolder]
     elif input_path:
         cmd = ["python", "deface.py", input_path]
     else:
-        return "请选择输入模式"
-
-    if output_path:
-        cmd.extend(["--output", output_path])
-    cmd.extend(["--detector", detector])
-    cmd.extend(["--thresh", str(thresh)])
-    cmd.extend(["--replacewith", replacewith])
-    if scale and scale != "原尺寸":
-        cmd.extend(["--scale", scale])
-    cmd.extend(["--preset", preset])
-    cmd.extend(["--encoder", encoder])
-    cmd.extend(["--batchsize", str(batchsize)])
-    cmd.extend(["--prefetch", str(prefetch)])
-    cmd.extend(["--prep-workers", str(prep_workers)])
-    cmd.extend(["--prep-threads", str(prep_threads)])
-    cmd.extend(["--infer-threads", str(infer_threads)])
-    cmd.extend(["--bitrate-margin", str(bitrate_margin)])
-
-    # 显示命令
-    log = "=== 开始处理 ===\n\n执行命令:\n" + " ".join(cmd) + "\n\n" + "="*60 + "\n\n"
-
-    try:
-        import time
-        start_time = time.time()
-
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__), timeout=3600)
-
-        elapsed = time.time() - start_time
-
-        log += f"处理耗时: {elapsed:.1f}秒\n\n"
-        log += "=== 标准输出 ===\n" + (result.stdout if result.stdout else "(无输出)\n")
-        log += "\n=== 标准错误 ===\n" + (result.stderr if result.stderr else "(无错误)\n")
-        log += f"\n=== 退出码: {result.returncode} ===\n"
-
-        return log
-    except subprocess.TimeoutExpired:
-        return log + "\n\n处理超时（超过1小时）"
-    except Exception as e:
-        return log + f"\n\n执行异常: {type(e).__name__}: {str(e)}"
-
-    # 清理路径
-    input_path = input_path.strip() if input_path else ""
-    sfolder = sfolder.strip() if sfolder else ""
-    output_path = output_path.strip() if output_path else ""
-
-    if input_path.startswith("file://"):
-        input_path = input_path[7:]
-    if sfolder.startswith("file://"):
-        sfolder = sfolder[7:]
-    if output_path.startswith("file://"):
-        output_path = output_path[7:]
-
-    input_path = unquote(input_path)
-    sfolder = unquote(sfolder)
-    output_path = unquote(output_path)
-
-    # 构建命令
-    if sfolder:
-        cmd = ["python", "deface.py", "--sfolder", sfolder]
-    elif input_path:
-        cmd = ["python", "deface.py", input_path]
-    else:
-        return "请选择输入模式"
+        return "请选择输入模式：普通文件夹或母文件夹"
 
     if output_path:
         cmd.extend(["--output", output_path])
@@ -124,19 +86,36 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
     cmd.extend(["--bitrate-margin", str(bitrate_margin)])
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        global current_process
+        current_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                           text=True, bufsize=1, cwd=os.path.dirname(__file__))
 
-        output = ""
-        if result.stdout:
-            output += result.stdout
-        if result.stderr:
-            output += "\n=== 错误信息 ===\n" + result.stderr
-        if result.returncode != 0:
-            output += f"\n\n进程退出码: {result.returncode}"
+        output = []
+        folder_prog = ""
+        video_prog = ""
 
-        return output if output else "处理完成（无输出）"
+        for line in current_process.stdout:
+            output.append(line)
+            # 解析进度信息 (需要根据deface.py实际输出调整)
+            if "folder" in line.lower() or "subfolder" in line.lower():
+                import re
+                match = re.search(r'(\d+)/(\d+)', line)
+                if match:
+                    folder_prog = f"{match.group(1)}/{match.group(2)}"
+            if "video" in line.lower() or "processing" in line.lower():
+                import re
+                match = re.search(r'(\d+)/(\d+)', line)
+                if match:
+                    video_prog = f"{match.group(1)}/{match.group(2)}"
+
+        current_process.wait()
+        current_process = None
+        log = "\n".join(output) if output else "处理完成"
+        return folder_prog, video_prog, log
+
     except Exception as e:
-        return f"执行错误: {str(e)}"
+        current_process = None
+        return "", "", f"错误: {str(e)}"
 
 with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     gr.Markdown("# 人脸脱敏工具 v1.0")
@@ -178,18 +157,27 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
         reset_btn = gr.Button("一键重置", variant="secondary", size="lg")
 
     gr.Markdown("### 处理进度")
-    output_log = gr.Textbox(label="日志输出", lines=20, max_lines=30)
+    status_text = gr.Textbox(label="状态", value="", interactive=False)
+    folder_progress = gr.Textbox(label="文件夹进度", value="", visible=False, interactive=False)
+    video_progress = gr.Textbox(label="当前文件夹内进度", value="", interactive=False)
+    output_log = gr.Textbox(label="日志输出", lines=15, max_lines=20)
 
-    run_btn.click(process_videos,
-                  [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
-                   encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin],
-                  output_log)
+    run_btn.click(
+        process_videos,
+        [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
+         encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin],
+        [folder_progress, video_progress, output_log]
+    )
 
-    stop_btn.click(stop_processing, None, output_log)
+    stop_btn.click(stop_processing, None, status_text)
 
-    reset_btn.click(reset_all, None,
-                    [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
-                     encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin, output_log])
+    reset_btn.click(
+        reset_all,
+        None,
+        [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
+         encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin,
+         status_text, folder_progress, video_progress, output_log]
+    )
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
