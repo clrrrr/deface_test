@@ -21,13 +21,18 @@ current_process = None
 
 def clean_path(p):
     """清理输入路径：去首尾空格/引号；若为浏览器拖拽的 file:// URL，则剥前缀并做 URL 解码。
+    兼容 Windows 与 Linux：
+      Linux  file:///media/x  -> /media/x   （保留开头斜杠）
+      Windows file:///D:/x     -> D:/x       （去掉 urlparse 残留的前导斜杠）
     手动输入的普通路径原样保留，避免误伤路径中合法的 % 字符。"""
     if not p:
         return ""
     p = p.strip().strip('"').strip("'")
     if p.startswith("file://"):
-        # file:///path 或 file://host/path -> 取路径部分并解码 %xx（中文/空格等）
         p = urllib.parse.unquote(urllib.parse.urlparse(p).path)
+        # Windows 盘符形式 "/D:/..." -> "D:/..."
+        if re.match(r'^/[A-Za-z]:', p):
+            p = p[1:]
     return p
 
 def stop_processing():
