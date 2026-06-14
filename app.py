@@ -90,4 +90,8 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
         output_log
     )
 
-demo.launch(server_name="0.0.0.0", server_port=7860)
+if __name__ == "__main__":
+    # 禁用代理避免socks协议错误
+    for key in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy']:
+        os.environ.pop(key, None)
+    demo.launch(server_name="0.0.0.0", server_port=7860)
