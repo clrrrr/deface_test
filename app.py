@@ -17,6 +17,34 @@ def stop_processing():
         return "已发送停止信号"
     return "没有正在运行的任务"
 
+def reset_all():
+    global current_process
+    if current_process:
+        current_process.terminate()
+        current_process = None
+    # 返回所有组件的默认值
+    return (
+        "",  # input_folder
+        "",  # sfolder
+        "",  # output_path
+        "scrfd",  # detector
+        0.5,  # thresh
+        "mosaic",  # replacewith
+        "640x360",  # scale
+        "ultrafast",  # preset
+        "libx264",  # encoder
+        64,  # batchsize
+        20,  # prefetch
+        16,  # prep_workers
+        2,  # prep_threads
+        16,  # infer_threads
+        1.10,  # bitrate_margin
+        "已重置所有设置",  # status_text
+        "",  # folder_progress
+        "",  # video_progress
+        ""  # output_log
+    )
+
 def process_videos(input_path, sfolder, output_path, detector, thresh, replacewith, scale, preset,
                    encoder, batchsize, prefetch, prep_workers, prep_threads,
                    infer_threads, bitrate_margin):
@@ -124,7 +152,9 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
                                       label="码率余量 (bitrate-margin)")
 
     run_btn = gr.Button("开始处理", variant="primary", size="lg")
-    stop_btn = gr.Button("停止处理", variant="stop", size="lg")
+    with gr.Row():
+        stop_btn = gr.Button("停止处理", variant="stop", size="lg")
+        reset_btn = gr.Button("一键重置", variant="secondary", size="lg")
 
     gr.Markdown("### 处理进度")
     status_text = gr.Textbox(label="状态", value="", interactive=False)
@@ -140,6 +170,14 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     )
 
     stop_btn.click(stop_processing, None, status_text)
+
+    reset_btn.click(
+        reset_all,
+        None,
+        [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
+         encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin,
+         status_text, folder_progress, video_progress, output_log]
+    )
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
