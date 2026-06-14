@@ -94,12 +94,16 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
     try:
         global current_process
         current_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                           text=True, cwd=os.path.dirname(__file__))
+                                           text=True, bufsize=1, cwd=os.path.dirname(__file__))
 
-        output, _ = current_process.communicate()
+        output = []
+        for line in current_process.stdout:
+            output.append(line)
+
+        current_process.wait()
         current_process = None
 
-        return "", "", output if output else "处理完成"
+        return "", "", "\n".join(output) if output else "处理完成"
 
     except Exception as e:
         current_process = None
