@@ -93,10 +93,15 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
 
     try:
         global current_process
+
+        # 显示即将执行的命令（调试用）
+        cmd_str = " ".join(cmd)
+        debug_info = f"执行命令：{cmd_str}\n\n{'='*50}\n\n"
+
         # 直接运行并获取输出
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
 
-        output = result.stdout + result.stderr
+        output = debug_info + result.stdout + result.stderr
         current_process = None
 
         return "", "", output if output else "处理完成"
