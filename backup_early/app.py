@@ -7,20 +7,15 @@ import gradio as gr
 import subprocess
 from pathlib import Path
 
-def process_videos(input_path, sfolder, output_path, detector, thresh, replacewith, scale, preset,
+def process_videos(sfolder, detector, thresh, replacewith, scale, preset,
                    encoder, batchsize, prefetch, prep_workers, prep_threads,
                    infer_threads, bitrate_margin):
 
-    # 二选一：sfolder模式或普通input模式
-    if sfolder:
-        cmd = ["python", "deface.py", "--sfolder", sfolder]
-    elif input_path:
-        cmd = ["python", "deface.py", input_path]
-    else:
-        return "请输入文件夹或母文件夹路径"
+    if not sfolder:
+        return "请输入母文件夹路径"
 
-    if output_path:
-        cmd.extend(["--output", output_path])
+    cmd = ["python", "deface.py", "--sfolder", sfolder]
+
     cmd.extend(["--detector", detector])
     cmd.extend(["--thresh", str(thresh)])
     cmd.extend(["--replacewith", replacewith])
@@ -37,7 +32,7 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
 
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, buffers=1, cwd=os.path.dirname(__file__))
+                                   text=True, bufsize=1, cwd=os.path.dirname(__file__))
 
         output = []
         for line in process.stdout:
@@ -57,9 +52,7 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     with gr.Row():
         with gr.Column():
             gr.Markdown("### 输入输出设置")
-            input_folder = gr.Textbox(label="文件夹路径 (input)", placeholder="输入视频文件夹路径")
-            sfolder = gr.Textbox(label="母文件夹路径 (sfolder)", placeholder="留空表示处理单个文件夹")
-            output_path = gr.Textbox(label="保存路径 (output)", placeholder="留空表示原路径")
+            sfolder = gr.Textbox(label="母文件夹路径 (sfolder)", placeholder="输入母文件夹路径")
 
             gr.Markdown("### 检测参数")
             detector = gr.Radio(["centerface", "scrfd"], value="scrfd", label="检测器 (detector)")
@@ -91,7 +84,7 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
 
     run_btn.click(
         process_videos,
-        [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
+        [sfolder, detector, thresh, replacewith, scale, preset,
          encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin],
         output_log
     )
