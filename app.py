@@ -63,9 +63,18 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
-        return result.stdout + result.stderr if (result.stdout or result.stderr) else "处理完成"
+
+        output = ""
+        if result.stdout:
+            output += result.stdout
+        if result.stderr:
+            output += "\n=== 错误信息 ===\n" + result.stderr
+        if result.returncode != 0:
+            output += f"\n\n进程退出码: {result.returncode}"
+
+        return output if output else "处理完成（无输出）"
     except Exception as e:
-        return f"错误: {str(e)}"
+        return f"执行错误: {str(e)}"
 
 with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     gr.Markdown("# 人脸脱敏工具 v1.0")
