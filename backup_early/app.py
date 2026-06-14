@@ -32,7 +32,7 @@ def process_videos(sfolder, detector, thresh, replacewith, scale, preset,
 
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, bufsize=1, cwd=os.path.dirname(__file__))
+                                   text=True, bufsize=1, cwd=os.path.dirname(os.path.dirname(__file__)))
 
         output = []
         for line in process.stdout:
