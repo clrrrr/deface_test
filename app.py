@@ -153,6 +153,10 @@ def clean_path(p):
     手动输入的普通路径原样保留，避免误伤路径中合法的 % 字符。"""
     if not p:
         return ""
+    # 去掉空字节及其它不可见控制字符（部分拖拽源是 UTF-16，字符间夹 \x00，会导致
+    # subprocess 报 "embedded null byte"）。\x00 去掉后 UTF-16 文本正好还原成正常路径。
+    p = p.replace("\x00", "")
+    p = "".join(ch for ch in p if ch == "\t" or ch >= " ")
     p = p.strip().strip('"').strip("'")
     if p.startswith("file://"):
         p = urllib.parse.unquote(urllib.parse.urlparse(p).path)
