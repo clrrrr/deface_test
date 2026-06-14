@@ -62,18 +62,26 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
     cmd.extend(["--bitrate-margin", str(bitrate_margin)])
 
     # 显示命令
-    log = "执行命令:\n" + " ".join(cmd) + "\n\n" + "="*60 + "\n\n"
+    log = "=== 开始处理 ===\n\n执行命令:\n" + " ".join(cmd) + "\n\n" + "="*60 + "\n\n"
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        import time
+        start_time = time.time()
 
-        log += "标准输出:\n" + (result.stdout if result.stdout else "(无)\n")
-        log += "\n标准错误:\n" + (result.stderr if result.stderr else "(无)\n")
-        log += f"\n退出码: {result.returncode}"
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__), timeout=3600)
+
+        elapsed = time.time() - start_time
+
+        log += f"处理耗时: {elapsed:.1f}秒\n\n"
+        log += "=== 标准输出 ===\n" + (result.stdout if result.stdout else "(无输出)\n")
+        log += "\n=== 标准错误 ===\n" + (result.stderr if result.stderr else "(无错误)\n")
+        log += f"\n=== 退出码: {result.returncode} ===\n"
 
         return log
+    except subprocess.TimeoutExpired:
+        return log + "\n\n处理超时（超过1小时）"
     except Exception as e:
-        return log + f"\n\n执行异常: {str(e)}"
+        return log + f"\n\n执行异常: {type(e).__name__}: {str(e)}"
 
     # 清理路径
     input_path = input_path.strip() if input_path else ""
