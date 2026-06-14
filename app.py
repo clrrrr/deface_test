@@ -3,9 +3,14 @@ import os
 for key in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy']:
     os.environ.pop(key, None)
 
+import sys
+import re
 import gradio as gr
 import subprocess
 from pathlib import Path
+
+# 日志框最多保留的行数（避免长视频日志无限增长拖慢界面）
+MAX_LOG_LINES = 300
 
 # 全局变量存储当前进程
 current_process = None
@@ -62,12 +67,14 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
         output_path = output_path[7:]
 
     # 二选一：sfolder模式或普通input模式
+    # 用 -u 关闭子进程缓冲，否则 tqdm/print 会被缓存、日志不实时
     if sfolder:
-        cmd = ["python", "deface.py", "--sfolder", sfolder]
+        cmd = [sys.executable, "-u", "deface.py", "--sfolder", sfolder]
     elif input_path:
-        cmd = ["python", "deface.py", input_path]
+        cmd = [sys.executable, "-u", "deface.py", input_path]
     else:
-        return "请选择输入模式：普通文件夹或母文件夹"
+        yield "", "", "请选择输入模式：普通文件夹或母文件夹"
+        return
 
     if output_path:
         cmd.extend(["--output", output_path])
@@ -85,37 +92,69 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
     cmd.extend(["--infer-threads", str(infer_threads)])
     cmd.extend(["--bitrate-margin", str(bitrate_margin)])
 
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
+    folder_prog = ""
+    video_prog = ""
+    lines = []        # 已完成的整行（以 \n 结尾）
+    cur = ""          # 当前正在刷新的行（tqdm 用 \r 在此行上反复刷新）
+
+    def render():
+        # 已完成行 + 当前刷新行，取末尾若干行显示
+        shown = lines[-MAX_LOG_LINES:]
+        body = "\n".join(shown)
+        if cur:
+            body = (body + "\n" + cur) if body else cur
+        return body
+
+    def parse_progress(text):
+        nonlocal folder_prog, video_prog
+        m = re.search(r'(\d+)/(\d+)', text)
+        if not m:
+            return
+        if "Batch progress" in text:
+            folder_prog = f"{m.group(1)}/{m.group(2)}"
+        elif "%|" in text:  # tqdm 帧进度条
+            video_prog = f"{m.group(1)}/{m.group(2)}"
+
     try:
         global current_process
-        current_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                           text=True, bufsize=1, cwd=os.path.dirname(__file__))
+        current_process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, cwd=os.path.dirname(__file__), env=env,
+        )
 
-        output = []
-        folder_prog = ""
-        video_prog = ""
+        yield folder_prog, video_prog, f"启动中：{' '.join(cmd)}\n"
 
-        for line in current_process.stdout:
-            output.append(line)
-            # 解析进度信息 (需要根据deface.py实际输出调整)
-            if "folder" in line.lower() or "subfolder" in line.lower():
-                import re
-                match = re.search(r'(\d+)/(\d+)', line)
-                if match:
-                    folder_prog = f"{match.group(1)}/{match.group(2)}"
-            if "video" in line.lower() or "processing" in line.lower():
-                import re
-                match = re.search(r'(\d+)/(\d+)', line)
-                if match:
-                    video_prog = f"{match.group(1)}/{match.group(2)}"
+        # 逐字符读取，按 \r / \n 双分隔，才能吃到 tqdm 的同行刷新
+        while True:
+            ch = current_process.stdout.read(1)
+            if ch == "":
+                break
+            if ch == "\n":
+                lines.append(cur)
+                parse_progress(cur)
+                cur = ""
+                yield folder_prog, video_prog, render()
+            elif ch == "\r":
+                # tqdm 回车刷新：解析后把当前行交给显示，再清空等待新内容覆盖
+                parse_progress(cur)
+                yield folder_prog, video_prog, render()
+                cur = ""
+            else:
+                cur += ch
+
+        if cur:
+            lines.append(cur)
 
         current_process.wait()
         current_process = None
-        log = "\n".join(output) if output else "处理完成"
-        return folder_prog, video_prog, log
+        yield folder_prog, video_prog, render() or "处理完成"
 
     except Exception as e:
         current_process = None
-        return "", "", f"错误: {str(e)}"
+        yield folder_prog, video_prog, f"错误: {str(e)}"
 
 with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     gr.Markdown("# 人脸脱敏工具 v1.0")
