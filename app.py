@@ -19,39 +19,6 @@ ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 # 全局变量存储当前进程
 current_process = None
 
-def augment_cuda_path(env):
-    """把 CUDA 及 conda 环境的 DLL 目录补进子进程 PATH（仅 Windows）。
-    现象：终端 `python deface.py` 能跑，但 web 拉起的子进程报
-    'CUDA_PATH is set but CUDA wasn't able to be loaded'。
-    根因：onnxruntime-gpu 依赖的 cuDNN/cuBLAS 等 DLL 在 conda 环境的 Library\\bin 里，
-    这些目录是 `conda activate` 才加进 PATH 的；若启动 web 时未激活，子进程就找不到。
-    这里依据正在运行的解释器(sys.executable)推导 conda 环境目录，并补上 CUDA_PATH\\bin，
-    相当于替子进程做一次 activate。非 Windows 直接返回。"""
-    if os.name != "nt":
-        return
-    extra = []
-
-    # 1) conda 环境自身的 DLL 目录（conda activate 会加这些）
-    env_root = os.path.dirname(sys.executable)
-    for sub in ("", r"Library\bin", r"Library\mingw-w64\bin", r"Library\usr\bin",
-                "Scripts", "bin"):
-        extra.append(os.path.join(env_root, sub) if sub else env_root)
-
-    # 2) 系统 CUDA Toolkit 的 bin（CUDA_PATH / CUDA_PATH_V* 派生）
-    for k, v in list(env.items()):
-        if v and (k == "CUDA_PATH" or k.startswith("CUDA_PATH_")):
-            extra.append(os.path.join(v, "bin"))
-            extra.append(os.path.join(v, "bin", "x64"))
-
-    cur = env.get("PATH", "")
-    cur_lower = cur.lower()
-    parts = []
-    for p in extra:
-        if os.path.isdir(p) and p.lower() not in cur_lower:
-            parts.append(p)
-    if parts:
-        env["PATH"] = os.pathsep.join(parts) + os.pathsep + cur
-
 def clean_path(p):
     """清理输入路径：去首尾空格/引号；若为浏览器拖拽的 file:// URL，则剥前缀并做 URL 解码。
     兼容 Windows 与 Linux：
@@ -140,7 +107,6 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    augment_cuda_path(env)
 
     folder_prog = ""
     video_prog = ""
