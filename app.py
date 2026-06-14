@@ -5,6 +5,7 @@ for key in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY',
 
 import sys
 import re
+import urllib.parse
 import gradio as gr
 import subprocess
 from pathlib import Path
@@ -17,6 +18,17 @@ ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 
 # 全局变量存储当前进程
 current_process = None
+
+def clean_path(p):
+    """清理输入路径：去首尾空格/引号；若为浏览器拖拽的 file:// URL，则剥前缀并做 URL 解码。
+    手动输入的普通路径原样保留，避免误伤路径中合法的 % 字符。"""
+    if not p:
+        return ""
+    p = p.strip().strip('"').strip("'")
+    if p.startswith("file://"):
+        # file:///path 或 file://host/path -> 取路径部分并解码 %xx（中文/空格等）
+        p = urllib.parse.unquote(urllib.parse.urlparse(p).path)
+    return p
 
 def stop_processing():
     global current_process
@@ -57,17 +69,10 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
     preset = "ultrafast"
     encoder = "libx264"
 
-    # 清理路径首尾空格和file://前缀
-    input_path = input_path.strip() if input_path else ""
-    sfolder = sfolder.strip() if sfolder else ""
-    output_path = output_path.strip() if output_path else ""
-
-    if input_path.startswith("file://"):
-        input_path = input_path[7:]
-    if sfolder.startswith("file://"):
-        sfolder = sfolder[7:]
-    if output_path.startswith("file://"):
-        output_path = output_path[7:]
+    # 清理路径：去首尾空格，处理 file:// 拖拽前缀并做 URL 解码（中文/空格会被百分号编码）
+    input_path = clean_path(input_path)
+    sfolder = clean_path(sfolder)
+    output_path = clean_path(output_path)
 
     # 二选一：sfolder模式或普通input模式
     # 用 -u 关闭子进程缓冲，否则 tqdm/print 会被缓存、日志不实时
