@@ -29,18 +29,20 @@ def _bar_key(seg):
     return m.group(1).strip() if m else "__bar__"
 
 def _count_from_bar(seg):
-    # 从进度条文本里抽 "x/y"
+    # 从进度条文本里抽 "x/y"（保留备用）
     m = re.search(r'(\d+)/(\d+)', seg or "")
     return f"{m.group(1)}/{m.group(2)}" if m else ""
 
 class _ProcState:
-    """单个子进程的输出状态：普通日志行 + 批次/帧进度条原文 + 当前处理的文件。读取线程写，主线程读。"""
+    """单个子进程的输出状态：普通日志行 + 批次/帧进度条 + 当前文件 + 该分片视频总数。"""
     def __init__(self, label):
         self.label = label
         self.lines = []        # 普通日志行(str)，进度条不进这里
-        self.folder = ""       # 批次进度条原文
+        self.folder = ""       # 批次进度条原文（Batch progress: x/y）
         self.video = ""        # 帧进度条原文
         self.current_file = "" # 当前正在处理的视频(带路径)
+        self.total = 0         # 本进程(分片)负责的视频总数
+        self.done = False      # 读取线程结束(进程退出)即为 True
         self.lock = threading.Lock()
 
     def add(self, seg):
@@ -58,6 +60,16 @@ class _ProcState:
                 if seg.lstrip().startswith("Input:"):
                     self.current_file = seg.split("Input:", 1)[1].strip()
                     self.video = ""
+                # 视频总数：分片模式优先用 "[shard] ... handling M videos"，
+                # 否则用 "[sfolder] Found N videos"（仅在分片数未知时）
+                if "shard" in seg and "handling" in seg:
+                    m = re.search(r'handling (\d+) videos', seg)
+                    if m:
+                        self.total = int(m.group(1))
+                elif "Found" in seg and "video" in seg and not self.total:
+                    m = re.search(r'Found (\d+) video', seg)
+                    if m:
+                        self.total = int(m.group(1))
                 self.lines.append(seg)
 
 def _reader(proc, st):
@@ -74,6 +86,8 @@ def _reader(proc, st):
             cur += ch
     if cur:
         st.add(cur)
+    with st.lock:
+        st.done = True
 
 def _render_log(states):
     if len(states) == 1:
@@ -89,21 +103,45 @@ def _render_log(states):
         blocks.append(f"─── {st.label} ───\n" + "\n".join(tail))
     return "\n\n".join(blocks)
 
-def _render_folder(states):
-    if len(states) == 1:
-        return states[0].folder
-    return "  |  ".join(f"{st.label}: {_count_from_bar(st.folder) or '-'}" for st in states)
+def _render_global(states):
+    # 全局聚合：运行中 | 已完成 | 剩余 (共 N 个视频)
+    total = 0
+    completed = 0
+    running = 0
+    known = False
+    for st in states:
+        with st.lock:
+            t = st.total
+            folder = st.folder
+            cur = st.current_file
+            done = st.done
+        m = re.search(r'(\d+)/(\d+)', folder)
+        x = int(m.group(1)) if m else 0
+        y = int(m.group(2)) if m else 0
+        if t:
+            total += t
+            known = True
+        elif y:
+            total += y
+            known = True
+        completed += x
+        if (not done) and cur:
+            running += 1
+    if not known:
+        return "准备中…"
+    remaining = max(0, total - completed - running)
+    return f"运行中 {running} | 已完成 {completed} | 剩余 {remaining}   (共 {total} 个视频)"
 
 def _render_video(states):
-    # 每个进程显示两行：当前文件(带路径) + 帧进度，便于查看正在处理谁
+    # 每个进程显示两行：当前文件(带路径) + 帧进度条(完整 tqdm 进度条)
     out = []
     for st in states:
         f = st.current_file or "-"
-        c = _count_from_bar(st.video) or "-"
+        bar = st.video or "-"
         if len(states) == 1:
-            out.append(f"{f}\n{c}")
+            out.append(f"{f}\n{bar}")
         else:
-            out.append(f"{st.label}: {f}\n    {c}")
+            out.append(f"{st.label}: {f}\n  {bar}")
     return "\n".join(out)
 
 def clean_path(p):
@@ -233,7 +271,7 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
         # 周期性产出合并视图（多进程下避免逐字符 yield 过于频繁）
         while True:
             alive = any(t.is_alive() for t in threads)
-            yield _render_folder(states), _render_video(states), _render_log(states)
+            yield _render_global(states), _render_video(states), _render_log(states)
             if not alive:
                 break
             time.sleep(0.3)
@@ -244,7 +282,7 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
             except Exception:
                 pass
         current_processes = []
-        yield _render_folder(states), _render_video(states), _render_log(states) or "处理完成"
+        yield _render_global(states), _render_video(states), _render_log(states) or "处理完成"
 
     except Exception as e:
         current_processes = []
@@ -292,7 +330,7 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
         # 右列：进度与日志，单独成栏，无需滚动即可看到
         with gr.Column(scale=2):
             gr.Markdown("### 处理进度")
-            folder_progress = gr.Textbox(label="文件夹进度 (批次)", value="", interactive=False)
+            folder_progress = gr.Textbox(label="全局进度", value="", interactive=False)
             video_progress = gr.Textbox(label="当前视频进度", value="", interactive=False,
                                         lines=8, max_lines=18)
             output_log = gr.Textbox(label="日志输出", lines=28, max_lines=28, autoscroll=True)
