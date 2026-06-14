@@ -9,17 +9,18 @@ from pathlib import Path
 
 def process_videos(input_path, sfolder, output_path, detector, thresh, replacewith, scale, preset,
                    encoder, batchsize, prefetch, prep_workers, prep_threads,
-                   infer_threads, bitrate_margin, progress=gr.Progress()):
+                   infer_threads, bitrate_margin):
 
-    if not input_path:
-        return "请选择输入文件夹"
-
-    cmd = ["python", "deface.py", input_path]
+    # 二选一：sfolder模式或普通input模式
+    if sfolder:
+        cmd = ["python", "deface.py", "--sfolder", sfolder]
+    elif input_path:
+        cmd = ["python", "deface.py", input_path]
+    else:
+        return "请输入文件夹或母文件夹路径"
 
     if output_path:
         cmd.extend(["--output", output_path])
-    if sfolder:
-        cmd.extend(["--sfolder", sfolder])
     cmd.extend(["--detector", detector])
     cmd.extend(["--thresh", str(thresh)])
     cmd.extend(["--replacewith", replacewith])
