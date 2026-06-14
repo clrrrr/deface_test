@@ -37,10 +37,7 @@ def reset_all():
         "",  # output_path
         "scrfd",  # detector
         0.5,  # thresh
-        "mosaic",  # replacewith
         "640x360",  # scale
-        "ultrafast",  # preset
-        "libx264",  # encoder
         64,  # batchsize
         20,  # prefetch
         16,  # prep_workers
@@ -52,9 +49,13 @@ def reset_all():
         "已重置所有设置"  # output_log
     )
 
-def process_videos(input_path, sfolder, output_path, detector, thresh, replacewith, scale, preset,
-                   encoder, batchsize, prefetch, prep_workers, prep_threads,
+def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
+                   batchsize, prefetch, prep_workers, prep_threads,
                    infer_threads, bitrate_margin):
+    # 固定默认值（界面已隐藏这些选项）
+    replacewith = "mosaic"
+    preset = "ultrafast"
+    encoder = "libx264"
 
     # 清理路径首尾空格和file://前缀
     input_path = input_path.strip() if input_path else ""
@@ -178,16 +179,11 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
                     thresh = gr.Slider(0.1, 0.9, value=0.5, step=0.05, label="检测阈值 (thresh)")
 
                     gr.Markdown("### 处理参数")
-                    replacewith = gr.Radio(["blur", "solid", "none", "mosaic"], value="mosaic",
-                                           label="替换方式 (replacewith)")
                     scale = gr.Dropdown(["原尺寸", "640x360", "1280x720"], value="640x360",
                                        label="缩放尺寸 (scale)")
 
                 with gr.Column():
                     gr.Markdown("### 性能参数")
-                    preset = gr.Dropdown(["ultrafast", "fast", "medium", "slow"], value="ultrafast",
-                                        label="编码预设 (preset)")
-                    encoder = gr.Textbox(value="libx264", label="编码器 (encoder)")
                     batchsize = gr.Slider(1, 128, value=64, step=1, label="批处理大小 (batchsize)")
                     prefetch = gr.Slider(1, 50, value=20, step=1, label="预取帧数 (prefetch)")
                     prep_workers = gr.Slider(1, 32, value=16, step=1, label="预处理进程数 (prep-workers)")
@@ -210,8 +206,8 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
 
     run_btn.click(
         process_videos,
-        [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
-         encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin],
+        [input_folder, sfolder, output_path, detector, thresh, scale,
+         batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin],
         [folder_progress, video_progress, output_log]
     )
 
@@ -220,8 +216,8 @@ with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
     reset_btn.click(
         reset_all,
         None,
-        [input_folder, sfolder, output_path, detector, thresh, replacewith, scale, preset,
-         encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin,
+        [input_folder, sfolder, output_path, detector, thresh, scale,
+         batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin,
          folder_progress, video_progress, output_log]
     )
 
