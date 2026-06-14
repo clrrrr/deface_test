@@ -6,6 +6,7 @@ for key in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY',
 import gradio as gr
 import subprocess
 from pathlib import Path
+from urllib.parse import unquote
 
 # 全局变量存储当前进程
 current_process = None
@@ -60,6 +61,11 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
         sfolder = sfolder[7:]
     if output_path.startswith("file://"):
         output_path = output_path[7:]
+
+    # URL解码（处理中文路径）
+    input_path = unquote(input_path)
+    sfolder = unquote(sfolder)
+    output_path = unquote(output_path)
 
     # 二选一：sfolder模式或普通input模式
     if sfolder:
