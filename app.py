@@ -94,30 +94,12 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, replacewi
     try:
         global current_process
         current_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                           text=True, bufsize=1, cwd=os.path.dirname(__file__))
+                                           text=True, cwd=os.path.dirname(__file__))
 
-        output = []
-        folder_prog = ""
-        video_prog = ""
-
-        for line in current_process.stdout:
-            output.append(line)
-            # 解析进度信息
-            if "folder" in line.lower() or "subfolder" in line.lower():
-                import re
-                match = re.search(r'(\d+)/(\d+)', line)
-                if match:
-                    folder_prog = f"{match.group(1)}/{match.group(2)}"
-            if "video" in line.lower() or "processing" in line.lower():
-                import re
-                match = re.search(r'(\d+)/(\d+)', line)
-                if match:
-                    video_prog = f"{match.group(1)}/{match.group(2)}"
-
-        current_process.wait()
+        output, _ = current_process.communicate()
         current_process = None
-        log = "\n".join(output) if output else "处理完成"
-        return folder_prog, video_prog, log
+
+        return "", "", output if output else "处理完成"
 
     except Exception as e:
         current_process = None
