@@ -8,6 +8,7 @@ default_onnx_path = f'{os.path.dirname(__file__)}/scrfd_1g.onnx'
 class SCRFD:
     def __init__(self, onnx_path=None, in_shape=None, backend='auto', override_execution_provider=None, gpu_id=0):
         self.in_shape = in_shape
+        self.override_execution_provider = override_execution_provider  # 供多GPU初始化时复用
         self.input_size = (640, 640)  # SCRFD default input size
 
         if onnx_path is None:
