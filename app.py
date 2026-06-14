@@ -1,35 +1,93 @@
 import gradio as gr
-import cv2
-from scrfd import SCRFD
+import subprocess
+import os
+import re
+from pathlib import Path
 
-detector = SCRFD()
+def process_videos(input_path, sfolder, detector, thresh, replacewith, scale, preset,
+                   encoder, batchsize, prefetch, prep_workers, prep_threads,
+                   infer_threads, bitrate_margin, progress=gr.Progress()):
 
-def detect_faces(image, threshold):
-    if image is None:
-        return None, "请上传图片"
+    if not input_path:
+        return "请输入文件夹路径"
 
-    img = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    dets, _ = detector.detect(img, threshold=threshold)
+    cmd = ["python", "deface.py", input_path]
 
-    for x1, y1, x2, y2, score in dets:
-        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-        cv2.putText(img, f'{score:.2f}', (int(x1), int(y1)-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    if sfolder:
+        cmd.extend(["--sfolder", sfolder])
+    cmd.extend(["--detector", detector])
+    cmd.extend(["--thresh", str(thresh)])
+    cmd.extend(["--replacewith", replacewith])
+    if scale:
+        cmd.extend(["--scale", scale])
+    cmd.extend(["--preset", preset])
+    cmd.extend(["--encoder", encoder])
+    cmd.extend(["--batchsize", str(batchsize)])
+    cmd.extend(["--prefetch", str(prefetch)])
+    cmd.extend(["--prep-workers", str(prep_workers)])
+    cmd.extend(["--prep-threads", str(prep_threads)])
+    cmd.extend(["--infer-threads", str(infer_threads)])
+    cmd.extend(["--bitrate-margin", str(bitrate_margin)])
 
-    result = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    return result, f"检测到 {len(dets)} 张人脸"
+    try:
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, buffers=1, cwd=os.path.dirname(__file__))
 
-with gr.Blocks(title="SCRFD人脸检测") as demo:
-    gr.Markdown("# SCRFD 人脸检测")
+        output = []
+        for line in process.stdout:
+            output.append(line)
+
+            # 解析进度信息
+            if "Processing" in line or "%" in line:
+                progress(0.5, desc=line.strip())
+
+        process.wait()
+        return "\n".join(output) if output else "处理完成"
+
+    except Exception as e:
+        return f"错误: {str(e)}"
+
+with gr.Blocks(title="人脸脱敏工具v1.0") as demo:
+    gr.Markdown("# 人脸脱敏工具 v1.0")
+
     with gr.Row():
         with gr.Column():
-            img_in = gr.Image(label="上传图片")
-            threshold = gr.Slider(0.1, 0.9, value=0.5, step=0.05, label="检测阈值")
-            btn = gr.Button("检测", variant="primary")
-        with gr.Column():
-            img_out = gr.Image(label="结果")
-            info = gr.Textbox(label="信息")
+            gr.Markdown("### 输入设置")
+            input_folder = gr.Textbox(label="文件夹路径 (input)", placeholder="/path/to/videos")
+            sfolder = gr.Textbox(label="母文件夹路径 (--sfolder)", placeholder="留空表示处理单个文件夹")
 
-    btn.click(detect_faces, [img_in, threshold], [img_out, info])
+            gr.Markdown("### 检测参数")
+            detector = gr.Radio(["centerface", "scrfd"], value="scrfd", label="检测器 (--detector)")
+            thresh = gr.Slider(0.1, 0.9, value=0.5, step=0.05, label="检测阈值 (--thresh)")
+
+            gr.Markdown("### 处理参数")
+            replacewith = gr.Radio(["blur", "solid", "none", "mosaic"], value="mosaic",
+                                   label="替换方式 (--replacewith)")
+            scale = gr.Textbox(label="缩放尺寸 (--scale)", placeholder="如: 1920x1080 (留空保持原尺寸)")
+
+        with gr.Column():
+            gr.Markdown("### 性能参数")
+            preset = gr.Dropdown(["ultrafast", "fast", "medium", "slow"], value="ultrafast",
+                                label="编码预设 (--preset)")
+            encoder = gr.Textbox(value="libx264", label="编码器 (--encoder)")
+            batchsize = gr.Slider(1, 128, value=64, step=1, label="批处理大小 (--batchsize)")
+            prefetch = gr.Slider(1, 50, value=20, step=1, label="预取帧数 (--prefetch)")
+            prep_workers = gr.Slider(1, 32, value=16, step=1, label="预处理进程数 (--prep-workers)")
+            prep_threads = gr.Slider(1, 16, value=2, step=1, label="预处理线程数 (--prep-threads)")
+            infer_threads = gr.Slider(1, 32, value=16, step=1, label="推理线程数 (--infer-threads)")
+            bitrate_margin = gr.Slider(1.0, 2.0, value=1.10, step=0.05,
+                                      label="码率余量 (--bitrate-margin)")
+
+    run_btn = gr.Button("开始处理", variant="primary", size="lg")
+
+    gr.Markdown("### 处理进度")
+    output_log = gr.Textbox(label="日志输出", lines=15, max_lines=20)
+
+    run_btn.click(
+        process_videos,
+        [input_folder, sfolder, detector, thresh, replacewith, scale, preset,
+         encoder, batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin],
+        output_log
+    )
 
 demo.launch(server_name="0.0.0.0", server_port=7860)
