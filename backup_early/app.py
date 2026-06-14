@@ -36,7 +36,14 @@ def process_videos(sfolder, detector, thresh, replacewith, scale, preset,
 
         output = []
         for line in process.stdout:
-            output.append(line)
+            line = line.strip()
+            if not line:
+                continue
+            # 进度行替换最后一行，其他行追加
+            if ("%" in line or "Processing" in line) and output:
+                output[-1] = line
+            else:
+                output.append(line)
             yield "\n".join(output)
 
         process.wait()
