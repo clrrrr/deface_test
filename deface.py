@@ -1249,8 +1249,14 @@ def main():
     prof = Profile(enabled=args.profile)
 
     multi_file = len(ipaths) > 1
+    total_videos = len(ipaths)        # 视频总数（分片后），用于显式进度上报
+    processed_count = 0               # 已处理(含跳过)计数
     if multi_file:
         ipaths = tqdm.tqdm(ipaths, position=0, dynamic_ncols=True, desc='Batch progress')
+
+    def _report_progress():
+        # 显式上报，不依赖 tqdm 显示（tqdm 节流会让快速跳过时进度条停在旧值）
+        print(f'[progress] done={processed_count} total={total_videos}', flush=True)
 
     for ipath in ipaths:
         # sfolder / 普通文件夹模式都用预生成的 mosaic 输出路径
@@ -1282,6 +1288,8 @@ def main():
             if os.path.exists(final_path):
                 print(f'Input:  {ipath}\nOutput: {final_path}')
                 print(f'[skip] 已完成，跳过：{final_path}')
+                processed_count += 1
+                _report_progress()
                 continue
             if os.path.exists(processing_path):
                 try:
@@ -1367,6 +1375,10 @@ def main():
             print(f'File {ipath} not found. Skipping...')
         else:
             print(f'File {ipath} has an unknown type {filetype}. Skipping...')
+
+        # 每处理完一个视频（非跳过路径）显式上报进度
+        processed_count += 1
+        _report_progress()
 
 
 if __name__ == '__main__':

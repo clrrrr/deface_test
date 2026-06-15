@@ -96,6 +96,7 @@ class _ProcState:
         self.video = ""        # 帧进度条原文
         self.current_file = "" # 当前正在处理的视频(带路径)
         self.total = 0         # 本进程(分片)负责的视频总数
+        self.completed = 0     # 已处理(含跳过)数，来自 deface 的 [progress] 显式上报
         self.done = False      # 读取线程结束(进程退出)即为 True
         self.lock = threading.Lock()
 
@@ -110,13 +111,17 @@ class _ProcState:
             if "Input:" in seg:
                 self.current_file = seg.split("Input:", 1)[1].strip()
                 self.video = ""
+            # 显式进度上报同理（会和批次条拼在一起），无条件解析。权威完成数，不受 tqdm 节流影响。
+            mp = re.search(r'\[progress\]\s+done=(\d+)\s+total=(\d+)', seg)
+            if mp:
+                self.completed = int(mp.group(1))
+                self.total = int(mp.group(2))
             if key == "Batch progress":
                 self.folder = seg
             elif key is not None:
                 self.video = seg
             else:
-                # 视频总数：分片模式优先用 "[shard] ... handling M videos"，
-                # 否则用 "[sfolder] Found N videos"（仅在分片数未知时）
+                # 兜底视频总数：分片用 "[shard] ... handling M videos"，否则 "[sfolder] Found N videos"
                 if "shard" in seg and "handling" in seg:
                     m = re.search(r'handling (\d+) videos', seg)
                     if m:
@@ -159,7 +164,7 @@ def _render_log(states):
     return "\n\n".join(blocks)
 
 def _render_global(states):
-    # 全局聚合：运行中 | 已完成 | 剩余 (共 N 个视频)
+    # 全局聚合：运行中 | 已完成 | 剩余 (共 N 个视频)。完成数用 deface 显式上报的 st.completed。
     total = 0
     completed = 0
     running = 0
@@ -167,19 +172,13 @@ def _render_global(states):
     for st in states:
         with st.lock:
             t = st.total
-            folder = st.folder
+            c = st.completed
             cur = st.current_file
             done = st.done
-        m = re.search(r'(\d+)/(\d+)', folder)
-        x = int(m.group(1)) if m else 0
-        y = int(m.group(2)) if m else 0
         if t:
             total += t
             known = True
-        elif y:
-            total += y
-            known = True
-        completed += x
+        completed += c
         if (not done) and cur:
             running += 1
     if not known:
