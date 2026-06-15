@@ -5,7 +5,7 @@ for key in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY',
 
 import sys
 import re
-import time
+import json
 import threading
 import urllib.parse
 import gradio as gr
@@ -18,8 +18,37 @@ MAX_LOG_LINES = 300
 # 匹配 ANSI 转义控制码（tqdm 在非终端下用于光标定位，会污染日志）
 ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 
-# 全局变量存储当前所有子进程（多进程并行时为多个）
+# 全局运行状态：与网页连接解耦。后台 reader 线程持续写入 RUN["states"]，
+# 网页用 gr.Timer 每秒从这里读取渲染——这样网页关了/刷新/换浏览器都能 load 回正在跑的任务。
 current_processes = []
+RUN = {"active": False, "states": []}   # states: list[_ProcState]
+RUN_LOCK = threading.Lock()
+
+# 配置持久化：每次开始处理时存盘，页面加载时回填（连 app.py 重启也能恢复表单设置）
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_config.json")
+CONFIG_KEYS = ["input_folder", "sfolder", "output_path", "detector", "thresh", "scale",
+               "batchsize", "prefetch", "prep_workers", "prep_threads", "infer_threads",
+               "bitrate_margin", "num_processes"]
+CONFIG_DEFAULTS = {
+    "input_folder": "", "sfolder": "", "output_path": "",
+    "detector": "scrfd", "thresh": 0.5, "scale": "640x360",
+    "batchsize": 64, "prefetch": 20, "prep_workers": 16, "prep_threads": 2,
+    "infer_threads": 16, "bitrate_margin": 1.10, "num_processes": 4,
+}
+
+def _save_config(cfg):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _load_config():
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 def _bar_key(seg):
     # 是否是 tqdm 进度条行；是则返回其标识（用于区分批次条/帧条），否则 None
@@ -167,13 +196,16 @@ def clean_path(p):
 
 def stop_processing():
     global current_processes
-    if current_processes:
-        n = len(current_processes)
-        for p in current_processes:
+    procs = current_processes
+    if procs:
+        n = len(procs)
+        for p in procs:
             try:
                 p.terminate()
             except Exception:
                 pass
+        with RUN_LOCK:
+            RUN["active"] = False
         return f"已发送停止信号（{n} 个进程）"
     return "没有正在运行的任务"
 
@@ -185,6 +217,14 @@ def reset_all():
         except Exception:
             pass
     current_processes = []
+    with RUN_LOCK:
+        RUN["active"] = False
+        RUN["states"] = []
+    try:
+        if os.path.exists(CONFIG_FILE):
+            os.remove(CONFIG_FILE)
+    except Exception:
+        pass
     # 返回所有组件的默认值
     return (
         "",  # input_folder
@@ -205,28 +245,35 @@ def reset_all():
         "已重置所有设置"  # output_log
     )
 
-def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
-                   batchsize, prefetch, prep_workers, prep_threads,
-                   infer_threads, bitrate_margin, num_processes):
+def start_processing(input_path, sfolder, output_path, detector, thresh, scale,
+                     batchsize, prefetch, prep_workers, prep_threads,
+                     infer_threads, bitrate_margin, num_processes):
+    """启动处理：拉起子进程 + 后台 reader 线程写入全局状态，然后立即返回。
+    实时显示由 gr.Timer 从全局状态拉取，与本次点击/网页连接无关。"""
+    global current_processes
+
+    # 保存配置（用户输入的原始值），供刷新/重开/重启后回填
+    cfg = dict(zip(CONFIG_KEYS, [input_path, sfolder, output_path, detector, thresh, scale,
+                                 batchsize, prefetch, prep_workers, prep_threads,
+                                 infer_threads, bitrate_margin, num_processes]))
+    _save_config(cfg)
+
     # 固定默认值（界面已隐藏这些选项）
     replacewith = "mosaic"
     preset = "ultrafast"
     encoder = "libx264"
 
-    # 清理路径：去首尾空格，处理 file:// 拖拽前缀并做 URL 解码（中文/空格会被百分号编码）
     input_path = clean_path(input_path)
     sfolder = clean_path(sfolder)
     output_path = clean_path(output_path)
 
-    # 二选一：sfolder模式或普通input模式
     # 用 -u 关闭子进程缓冲，否则 tqdm/print 会被缓存、日志不实时
     if sfolder:
         base_cmd = [sys.executable, "-u", "deface.py", "--sfolder", sfolder]
     elif input_path:
         base_cmd = [sys.executable, "-u", "deface.py", input_path]
     else:
-        yield "", "", "请选择输入模式：普通文件夹或母文件夹"
-        return
+        return "", "", "请选择输入模式：普通文件夹或母文件夹"
 
     if output_path:
         base_cmd.extend(["--output", output_path])
@@ -255,43 +302,61 @@ def process_videos(input_path, sfolder, output_path, detector, thresh, scale,
     else:
         cmds = [("进程0", base_cmd)]
 
+    # 先停掉可能还在跑的旧任务，避免叠加
+    for p in current_processes:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
     try:
-        global current_processes
-        current_processes = []
+        new_procs = []
         states = []
-        threads = []
         for label, cmd in cmds:
             p = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, cwd=os.path.dirname(__file__), env=env,
             )
-            current_processes.append(p)
+            new_procs.append(p)
             st = _ProcState(label)
             st.lines.append(f"启动中：{' '.join(cmd)}")
             states.append(st)
-            t = threading.Thread(target=_reader, args=(p, st), daemon=True)
-            t.start()
-            threads.append(t)
-
-        # 周期性产出合并视图（多进程下避免逐字符 yield 过于频繁）
-        while True:
-            alive = any(t.is_alive() for t in threads)
-            yield _render_global(states), _render_video(states), _render_log(states)
-            if not alive:
-                break
-            time.sleep(0.3)
-
-        for p in current_processes:
-            try:
-                p.wait(timeout=5)
-            except Exception:
-                pass
-        current_processes = []
-        yield _render_global(states), _render_video(states), _render_log(states) or "处理完成"
-
+            threading.Thread(target=_reader, args=(p, st), daemon=True).start()
+        current_processes = new_procs
+        with RUN_LOCK:
+            RUN["active"] = True
+            RUN["states"] = states
+        return _render_global(states), _render_video(states), _render_log(states)
     except Exception as e:
-        current_processes = []
-        yield "", "", f"错误: {str(e)}"
+        return "", "", f"错误: {str(e)}"
+
+def tick():
+    """gr.Timer 每秒调用：从全局状态渲染进度，与是谁的网页无关。"""
+    with RUN_LOCK:
+        states = list(RUN["states"])
+    if not states:
+        return "", "", ""
+    if all(st.done for st in states):
+        with RUN_LOCK:
+            RUN["active"] = False
+    return _render_global(states), _render_video(states), _render_log(states)
+
+def load_state():
+    """页面加载时：回填上次配置 + 接回正在跑的任务的当前进度。"""
+    cfg = _load_config()
+
+    def g(k):
+        return cfg.get(k, CONFIG_DEFAULTS[k])
+
+    with RUN_LOCK:
+        states = list(RUN["states"])
+    pf = _render_global(states) if states else ""
+    pv = _render_video(states) if states else ""
+    pl = _render_log(states) if states else ""
+    return (g("input_folder"), g("sfolder"), g("output_path"), g("detector"),
+            g("thresh"), g("scale"), g("batchsize"), g("prefetch"), g("prep_workers"),
+            g("prep_threads"), g("infer_threads"), g("bitrate_margin"), g("num_processes"),
+            pf, pv, pl)
 
 with gr.Blocks(title="人脸脱敏工具v2.0") as demo:
     gr.Markdown("# 人脸脱敏工具 v2.0")
@@ -340,22 +405,23 @@ with gr.Blocks(title="人脸脱敏工具v2.0") as demo:
                                         lines=8, max_lines=18)
             output_log = gr.Textbox(label="日志输出", lines=28, max_lines=28, autoscroll=True)
 
-    run_btn.click(
-        process_videos,
-        [input_folder, sfolder, output_path, detector, thresh, scale,
-         batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin, num_processes],
-        [folder_progress, video_progress, output_log]
-    )
+    # 所有输入组件（用于 demo.load 回填配置）
+    _inputs = [input_folder, sfolder, output_path, detector, thresh, scale,
+               batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin, num_processes]
+    _progress = [folder_progress, video_progress, output_log]
+
+    # 定时器：每秒从全局状态拉取进度并刷新（与是谁的网页无关，断线/刷新后自动接回）
+    timer = gr.Timer(1.0)
+    timer.tick(tick, None, _progress)
+
+    run_btn.click(start_processing, _inputs, _progress)
 
     stop_btn.click(stop_processing, None, output_log)
 
-    reset_btn.click(
-        reset_all,
-        None,
-        [input_folder, sfolder, output_path, detector, thresh, scale,
-         batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin, num_processes,
-         folder_progress, video_progress, output_log]
-    )
+    reset_btn.click(reset_all, None, _inputs + _progress)
+
+    # 页面加载：回填上次配置 + 接回正在运行任务的进度
+    demo.load(load_state, None, _inputs + _progress)
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)

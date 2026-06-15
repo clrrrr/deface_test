@@ -14,3 +14,4 @@ inputs/
 
 # macOS
 .DS_Store
+last_config.json
