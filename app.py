@@ -19,14 +19,13 @@ MAX_LOG_LINES = 300
 # 匹配 ANSI 转义控制码（tqdm 在非终端下用于光标定位，会污染日志）
 ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 
-# 全局运行状态：与网页连接解耦。后台 reader 线程持续写入 RUN["states"]，
-# 网页用 gr.Timer 每秒从这里读取渲染——这样网页关了/刷新/换浏览器都能 load 回正在跑的任务。
+# 全局运行状态：与网页连接解耦，且只活在本次程序运行期间（程序重启即清空）。
+# 后台 reader 线程写入 RUN["states"]；RUN["config"] 存当前任务配置供同生命周期内的网页刷新回填。
 current_processes = []
-RUN = {"active": False, "states": []}   # states: list[_ProcState]
+RUN = {"active": False, "states": [], "config": {}}   # states: list[_ProcState]
 RUN_LOCK = threading.Lock()
 
-# 配置持久化：每次开始处理时存盘，页面加载时回填（连 app.py 重启也能恢复表单设置）
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_config.json")
+# 配置只存内存（RUN["config"]），不落盘——程序关闭即失效，符合“重启后从文件名恢复进度”的设计。
 CONFIG_KEYS = ["input_folder", "sfolder", "output_path", "detector", "thresh", "scale",
                "batchsize", "prefetch", "prep_workers", "prep_threads", "infer_threads",
                "bitrate_margin", "num_processes"]
@@ -38,18 +37,21 @@ CONFIG_DEFAULTS = {
 }
 
 def _save_config(cfg):
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    # 只存内存，程序重启即清空
+    with RUN_LOCK:
+        RUN["config"] = dict(cfg)
 
 def _load_config():
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    with RUN_LOCK:
+        return dict(RUN["config"])
+
+# 清理旧版本可能遗留的配置存档文件（现在配置只存内存）
+try:
+    _old_cfg = os.path.join(os.path.dirname(__file__), "last_config.json")
+    if os.path.exists(_old_cfg):
+        os.remove(_old_cfg)
+except Exception:
+    pass
 
 # 运行态文件：仅在后台有任务运行时存在，记录当前任务路径（供断线重连）。
 # 程序一启动就清空——里面的任务随上个进程已死亡，是过期信息；
@@ -313,12 +315,8 @@ def reset_all():
     with RUN_LOCK:
         RUN["active"] = False
         RUN["states"] = []
+        RUN["config"] = {}
     _clear_running()
-    try:
-        if os.path.exists(CONFIG_FILE):
-            os.remove(CONFIG_FILE)
-    except Exception:
-        pass
     # 返回所有组件的默认值
     return (
         "",  # input_folder
