@@ -281,11 +281,13 @@ def _progress_text_from_paths(input_path, sfolder):
     return text
 
 def refresh_progress(input_path, sfolder):
-    """表单路径变化/手动刷新时：从该路径的输出目录读取进度（仅在没有内存任务时显示）。"""
+    """表单路径变化/手动刷新：记录路径到内存配置(供定时器空闲扫描)，返回该路径的磁盘进度。"""
     with RUN_LOCK:
-        has_live = bool(RUN["states"])
-    if has_live:
-        return gr.skip()   # 有正在跑的任务，进度由定时器实时驱动，别覆盖
+        RUN["config"]["input_folder"] = input_path
+        RUN["config"]["sfolder"] = sfolder
+        states = list(RUN["states"])
+    if states:
+        return _render_global(states)   # 有任务则显示实时全局进度
     return _progress_text_from_paths(input_path, sfolder)
 
 def stop_processing():
@@ -423,16 +425,19 @@ def start_processing(input_path, sfolder, output_path, detector, thresh, scale,
         return "", "", f"错误: {str(e)}"
 
 def tick():
-    """gr.Timer 每秒调用：有内存任务则实时刷新；没有则不动（磁盘进度由路径变化/加载时刷新）。"""
+    """gr.Timer 每秒调用：有内存任务则实时刷新；没有则扫描内存配置里的路径的输出目录。
+    始终返回真实值（不用 gr.skip，避免某些 gradio 版本不支持而让定时器失效）。"""
     with RUN_LOCK:
         states = list(RUN["states"])
-    if not states:
-        return gr.skip(), gr.skip(), gr.skip()
-    if all(st.done for st in states):
-        with RUN_LOCK:
-            RUN["active"] = False
-        _clear_running()   # 任务全部完成，清掉运行态文件
-    return _render_global(states), _render_video(states), _render_log(states)
+        cfg = dict(RUN["config"])
+    if states:
+        if all(st.done for st in states):
+            with RUN_LOCK:
+                RUN["active"] = False
+            _clear_running()   # 任务全部完成，清掉运行态文件
+        return _render_global(states), _render_video(states), _render_log(states)
+    # 无内存任务（如 app.py 重启后）：扫描配置路径的输出目录文件名
+    return _progress_text_from_paths(cfg.get("input_folder", ""), cfg.get("sfolder", "")), "", ""
 
 def load_state():
     """页面加载：回填上次配置 + 接回正在跑的任务进度；无内存任务则从输出目录文件名读进度。"""
