@@ -6,6 +6,7 @@ for key in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY',
 import sys
 import re
 import json
+import time
 import threading
 import urllib.parse
 import gradio as gr
@@ -194,8 +195,68 @@ def clean_path(p):
             p = p[1:]
     return p
 
+# 磁盘进度扫描：app.py 重启后内存状态丢失，改从输出目录文件名重建进度。
+# 命名约定：完成=*_msc.ext，处理中被中断=*_processing.ext，未开始=无文件。
+_VIDEO_EXTS = ('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v', '.webm')
+_DISK_CACHE = {"t": 0.0, "key": None, "text": ""}
+
+def _scan_disk_progress(input_path, sfolder):
+    input_path = clean_path(input_path)
+    sfolder = clean_path(sfolder)
+    pairs = []  # (最终_msc路径, 处理中_processing路径)
+
+    def collect(folder):
+        mosaic = os.path.join(folder, "mosaic")
+        try:
+            names = os.listdir(folder)
+        except Exception:
+            return
+        for fn in names:
+            fp = os.path.join(folder, fn)
+            if os.path.isfile(fp) and fn.lower().endswith(_VIDEO_EXTS):
+                name, ext = os.path.splitext(fn)
+                pairs.append((os.path.join(mosaic, f"{name}_msc{ext}"),
+                              os.path.join(mosaic, f"{name}_processing{ext}")))
+
+    if sfolder and os.path.isdir(sfolder):
+        for sub in sorted(os.listdir(sfolder)):
+            sp = os.path.join(sfolder, sub)
+            if os.path.isdir(sp):
+                collect(sp)
+    elif input_path and os.path.isdir(input_path):
+        collect(input_path)
+    else:
+        return None
+
+    if not pairs:
+        return None
+    total = len(pairs)
+    done = sum(1 for msc, _ in pairs if os.path.exists(msc))
+    processing = sum(1 for msc, proc in pairs
+                     if not os.path.exists(msc) and os.path.exists(proc))
+    notstarted = total - done - processing
+    return total, done, processing, notstarted
+
+def _disk_progress_text():
+    """从持久化配置里的路径扫描磁盘，返回进度摘要（带 3 秒缓存，避免每秒狂扫盘）。"""
+    cfg = _load_config()
+    key = (cfg.get("input_folder", ""), cfg.get("sfolder", ""))
+    now = time.time()
+    if key == _DISK_CACHE["key"] and now - _DISK_CACHE["t"] < 3.0:
+        return _DISK_CACHE["text"]
+    try:
+        scan = _scan_disk_progress(key[0], key[1])
+    except Exception:
+        scan = None
+    if scan:
+        total, done, processing, notstarted = scan
+        text = f"（从输出目录读取）已完成 {done} | 中断 {processing} | 未开始 {notstarted}   (共 {total} 个视频)"
+    else:
+        text = ""
+    _DISK_CACHE.update(t=now, key=key, text=text)
+    return text
+
 def stop_processing():
-    global current_processes
     procs = current_processes
     if procs:
         n = len(procs)
@@ -331,18 +392,18 @@ def start_processing(input_path, sfolder, output_path, detector, thresh, scale,
         return "", "", f"错误: {str(e)}"
 
 def tick():
-    """gr.Timer 每秒调用：从全局状态渲染进度，与是谁的网页无关。"""
+    """gr.Timer 每秒调用：有内存中任务则显示实时进度；否则(如 app.py 重启后)从输出目录读进度。"""
     with RUN_LOCK:
         states = list(RUN["states"])
     if not states:
-        return "", "", ""
+        return _disk_progress_text(), "", ""
     if all(st.done for st in states):
         with RUN_LOCK:
             RUN["active"] = False
     return _render_global(states), _render_video(states), _render_log(states)
 
 def load_state():
-    """页面加载时：回填上次配置 + 接回正在跑的任务的当前进度。"""
+    """页面加载时：回填上次配置 + 接回正在跑的任务进度；无内存任务则从输出目录读进度。"""
     cfg = _load_config()
 
     def g(k):
@@ -350,9 +411,14 @@ def load_state():
 
     with RUN_LOCK:
         states = list(RUN["states"])
-    pf = _render_global(states) if states else ""
-    pv = _render_video(states) if states else ""
-    pl = _render_log(states) if states else ""
+    if states:
+        pf = _render_global(states)
+        pv = _render_video(states)
+        pl = _render_log(states)
+    else:
+        pf = _disk_progress_text()
+        pv = ""
+        pl = ""
     return (g("input_folder"), g("sfolder"), g("output_path"), g("detector"),
             g("thresh"), g("scale"), g("batchsize"), g("prefetch"), g("prep_workers"),
             g("prep_threads"), g("infer_threads"), g("bitrate_margin"), g("num_processes"),
