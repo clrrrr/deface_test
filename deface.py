@@ -1269,13 +1269,34 @@ def main():
         if opath is None and not is_cam:
             root, ext = os.path.splitext(ipath)
             opath = f'{root}_anonymized{ext}'
-        print(f'Input:  {ipath}\nOutput: {opath}')
+
+        # 断点续传：处理中写为 *_processing，完成后原子改名为最终输出(*_msc)。
+        # 重启后看输出目录文件名即可知道哪些已完成(_msc)、哪些被中断(残留 _processing)。
+        final_path = opath
+        processing_path = None
+        write_opath = opath
+        if opath is not None and not is_cam and not enable_preview:
+            root, ext = os.path.splitext(opath)
+            base = root[:-4] if root.endswith('_msc') else root
+            processing_path = base + '_processing' + ext
+            if os.path.exists(final_path):
+                print(f'Input:  {ipath}\nOutput: {final_path}')
+                print(f'[skip] 已完成，跳过：{final_path}')
+                continue
+            if os.path.exists(processing_path):
+                try:
+                    os.remove(processing_path)   # 清掉上次中断遗留的半成品
+                except Exception:
+                    pass
+            write_opath = processing_path
+
+        print(f'Input:  {ipath}\nOutput: {final_path}')
         if opath is None and not enable_preview:
             print('No output file is specified and the preview GUI is disabled. No output will be produced.')
         if filetype == 'video' or is_cam:
             result = video_detect(
                 ipath=ipath,
-                opath=opath,
+                opath=write_opath,
                 centerface=centerface,
                 threshold=threshold,
                 cam=is_cam,
@@ -1298,6 +1319,14 @@ def main():
                 infer_threads=args.infer_threads,
                 prconf=args.prconf,
             )
+            # 成功完成 -> 把 *_processing 原子改名为最终 *_msc
+            if result is not None and processing_path is not None and os.path.exists(processing_path):
+                try:
+                    if os.path.exists(final_path):
+                        os.remove(final_path)
+                    os.replace(processing_path, final_path)
+                except Exception as e:
+                    print(f'[warn] 重命名失败 {processing_path} -> {final_path}: {e}')
             if result is not None and not is_cam:
                 total_frames, face_frames = result
                 ratio = face_frames / total_frames if total_frames > 0 else 0.0
@@ -1312,7 +1341,7 @@ def main():
         elif filetype == 'image':
             image_detect(
                 ipath=ipath,
-                opath=opath,
+                opath=write_opath,
                 centerface=centerface,
                 threshold=threshold,
                 replacewith=replacewith,
@@ -1324,6 +1353,14 @@ def main():
                 replaceimg=replaceimg,
                 mosaicsize=mosaicsize
             )
+            # 成功完成 -> 把 *_processing 原子改名为最终输出
+            if processing_path is not None and os.path.exists(processing_path):
+                try:
+                    if os.path.exists(final_path):
+                        os.remove(final_path)
+                    os.replace(processing_path, final_path)
+                except Exception as e:
+                    print(f'[warn] 重命名失败 {processing_path} -> {final_path}: {e}')
         elif filetype is None:
             print(f'Can\'t determine file type of file {ipath}. Skipping...')
         elif filetype == 'notfound':
