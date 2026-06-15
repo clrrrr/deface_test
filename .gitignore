@@ -15,3 +15,4 @@ inputs/
 # macOS
 .DS_Store
 last_config.json
+running_task.json

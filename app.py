@@ -51,6 +51,28 @@ def _load_config():
     except Exception:
         return {}
 
+# 运行态文件：仅在后台有任务运行时存在，记录当前任务路径（供断线重连）。
+# 程序一启动就清空——里面的任务随上个进程已死亡，是过期信息；
+# 重启后的进度恢复只靠输出目录文件名(_msc/_processing)，不依赖任何 json。
+RUNNING_FILE = os.path.join(os.path.dirname(__file__), "running_task.json")
+
+def _write_running(cfg):
+    try:
+        with open(RUNNING_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _clear_running():
+    try:
+        if os.path.exists(RUNNING_FILE):
+            os.remove(RUNNING_FILE)
+    except Exception:
+        pass
+
+# 启动即清空过期运行态
+_clear_running()
+
 def _bar_key(seg):
     # 是否是 tqdm 进度条行；是则返回其标识（用于区分批次条/帧条），否则 None
     if "%|" not in seg and "it/s" not in seg:
@@ -220,6 +242,8 @@ def _scan_disk_progress(input_path, sfolder):
 
     if sfolder and os.path.isdir(sfolder):
         for sub in sorted(os.listdir(sfolder)):
+            if sub == "mosaic":
+                continue  # 跳过输出目录，别把自己的产物当成输入
             sp = os.path.join(sfolder, sub)
             if os.path.isdir(sp):
                 collect(sp)
@@ -237,10 +261,9 @@ def _scan_disk_progress(input_path, sfolder):
     notstarted = total - done - processing
     return total, done, processing, notstarted
 
-def _disk_progress_text():
-    """从持久化配置里的路径扫描磁盘，返回进度摘要（带 3 秒缓存，避免每秒狂扫盘）。"""
-    cfg = _load_config()
-    key = (cfg.get("input_folder", ""), cfg.get("sfolder", ""))
+def _progress_text_from_paths(input_path, sfolder):
+    """扫描输出目录文件名，返回进度摘要（带 3 秒缓存）。路径来自网页表单当前值，不依赖 json。"""
+    key = (clean_path(input_path), clean_path(sfolder))
     now = time.time()
     if key == _DISK_CACHE["key"] and now - _DISK_CACHE["t"] < 3.0:
         return _DISK_CACHE["text"]
@@ -256,6 +279,14 @@ def _disk_progress_text():
     _DISK_CACHE.update(t=now, key=key, text=text)
     return text
 
+def refresh_progress(input_path, sfolder):
+    """表单路径变化/手动刷新时：从该路径的输出目录读取进度（仅在没有内存任务时显示）。"""
+    with RUN_LOCK:
+        has_live = bool(RUN["states"])
+    if has_live:
+        return gr.skip()   # 有正在跑的任务，进度由定时器实时驱动，别覆盖
+    return _progress_text_from_paths(input_path, sfolder)
+
 def stop_processing():
     procs = current_processes
     if procs:
@@ -267,6 +298,7 @@ def stop_processing():
                 pass
         with RUN_LOCK:
             RUN["active"] = False
+        _clear_running()
         return f"已发送停止信号（{n} 个进程）"
     return "没有正在运行的任务"
 
@@ -281,6 +313,7 @@ def reset_all():
     with RUN_LOCK:
         RUN["active"] = False
         RUN["states"] = []
+    _clear_running()
     try:
         if os.path.exists(CONFIG_FILE):
             os.remove(CONFIG_FILE)
@@ -313,11 +346,12 @@ def start_processing(input_path, sfolder, output_path, detector, thresh, scale,
     实时显示由 gr.Timer 从全局状态拉取，与本次点击/网页连接无关。"""
     global current_processes
 
-    # 保存配置（用户输入的原始值），供刷新/重开/重启后回填
+    # 保存配置（用户输入的原始值），供刷新/重开后回填
     cfg = dict(zip(CONFIG_KEYS, [input_path, sfolder, output_path, detector, thresh, scale,
                                  batchsize, prefetch, prep_workers, prep_threads,
                                  infer_threads, bitrate_margin, num_processes]))
     _save_config(cfg)
+    _write_running(cfg)   # 标记"有任务正在运行"（程序重启时会被清空）
 
     # 固定默认值（界面已隐藏这些选项）
     replacewith = "mosaic"
@@ -392,18 +426,19 @@ def start_processing(input_path, sfolder, output_path, detector, thresh, scale,
         return "", "", f"错误: {str(e)}"
 
 def tick():
-    """gr.Timer 每秒调用：有内存中任务则显示实时进度；否则(如 app.py 重启后)从输出目录读进度。"""
+    """gr.Timer 每秒调用：有内存任务则实时刷新；没有则不动（磁盘进度由路径变化/加载时刷新）。"""
     with RUN_LOCK:
         states = list(RUN["states"])
     if not states:
-        return _disk_progress_text(), "", ""
+        return gr.skip(), gr.skip(), gr.skip()
     if all(st.done for st in states):
         with RUN_LOCK:
             RUN["active"] = False
+        _clear_running()   # 任务全部完成，清掉运行态文件
     return _render_global(states), _render_video(states), _render_log(states)
 
 def load_state():
-    """页面加载时：回填上次配置 + 接回正在跑的任务进度；无内存任务则从输出目录读进度。"""
+    """页面加载：回填上次配置 + 接回正在跑的任务进度；无内存任务则从输出目录文件名读进度。"""
     cfg = _load_config()
 
     def g(k):
@@ -416,7 +451,8 @@ def load_state():
         pv = _render_video(states)
         pl = _render_log(states)
     else:
-        pf = _disk_progress_text()
+        # 无内存任务（如 app.py 重启后）：扫描表单里那个路径的输出目录文件名
+        pf = _progress_text_from_paths(g("input_folder"), g("sfolder"))
         pv = ""
         pl = ""
     return (g("input_folder"), g("sfolder"), g("output_path"), g("detector"),
@@ -461,6 +497,7 @@ with gr.Blocks(title="人脸脱敏工具v2.0") as demo:
             run_btn = gr.Button("开始处理", variant="primary", size="lg")
             with gr.Row():
                 stop_btn = gr.Button("停止处理", variant="stop", size="lg")
+                refresh_btn = gr.Button("刷新进度", size="lg")
                 reset_btn = gr.Button("一键重置", variant="secondary", size="lg")
 
         # 右列：进度与日志，单独成栏，无需滚动即可看到
@@ -486,7 +523,12 @@ with gr.Blocks(title="人脸脱敏工具v2.0") as demo:
 
     reset_btn.click(reset_all, None, _inputs + _progress)
 
-    # 页面加载：回填上次配置 + 接回正在运行任务的进度
+    # 改路径 / 点刷新 → 从该路径的输出目录文件名读取进度（无内存任务时）
+    input_folder.change(refresh_progress, [input_folder, sfolder], folder_progress)
+    sfolder.change(refresh_progress, [input_folder, sfolder], folder_progress)
+    refresh_btn.click(refresh_progress, [input_folder, sfolder], folder_progress)
+
+    # 页面加载：回填上次配置 + 接回正在运行任务的进度（无则按表单路径读磁盘进度）
     demo.load(load_state, None, _inputs + _progress)
 
 if __name__ == "__main__":
