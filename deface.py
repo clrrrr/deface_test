@@ -1258,6 +1258,8 @@ def main():
         # 显式上报，不依赖 tqdm 显示（tqdm 节流会让快速跳过时进度条停在旧值）
         print(f'[progress] done={processed_count} total={total_videos}', flush=True)
 
+    _report_progress()   # 开跑前先上报总数(done=0)，避免界面长时间停在“准备中”
+
     for ipath in ipaths:
         # sfolder / 普通文件夹模式都用预生成的 mosaic 输出路径
         if ipath in output_map:
