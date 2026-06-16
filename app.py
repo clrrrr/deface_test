@@ -28,12 +28,12 @@ RUN_LOCK = threading.Lock()
 # 配置只存内存（RUN["config"]），不落盘——程序关闭即失效，符合“重启后从文件名恢复进度”的设计。
 CONFIG_KEYS = ["input_folder", "sfolder", "output_path", "detector", "thresh", "scale",
                "batchsize", "prefetch", "prep_workers", "prep_threads", "infer_threads",
-               "bitrate_margin", "num_processes"]
+               "bitrate_margin", "num_processes", "encoder"]
 CONFIG_DEFAULTS = {
     "input_folder": "", "sfolder": "", "output_path": "",
     "detector": "scrfd", "thresh": 0.5, "scale": "640x360",
     "batchsize": 64, "prefetch": 20, "prep_workers": 16, "prep_threads": 2,
-    "infer_threads": 16, "bitrate_margin": 1.10, "num_processes": 4,
+    "infer_threads": 16, "bitrate_margin": 1.10, "num_processes": 4, "encoder": "libx264",
 }
 
 def _save_config(cfg):
@@ -333,6 +333,7 @@ def reset_all():
         16,  # infer_threads
         1.10,  # bitrate_margin
         4,  # num_processes
+        "libx264",  # encoder
         "",  # folder_progress
         "",  # video_progress
         "已重置所有设置"  # output_log
@@ -340,7 +341,7 @@ def reset_all():
 
 def start_processing(input_path, sfolder, output_path, detector, thresh, scale,
                      batchsize, prefetch, prep_workers, prep_threads,
-                     infer_threads, bitrate_margin, num_processes):
+                     infer_threads, bitrate_margin, num_processes, encoder):
     """启动处理：拉起子进程 + 后台 reader 线程写入全局状态，然后立即返回。
     实时显示由 gr.Timer 从全局状态拉取，与本次点击/网页连接无关。"""
     global current_processes
@@ -348,14 +349,13 @@ def start_processing(input_path, sfolder, output_path, detector, thresh, scale,
     # 保存配置（用户输入的原始值），供刷新/重开后回填
     cfg = dict(zip(CONFIG_KEYS, [input_path, sfolder, output_path, detector, thresh, scale,
                                  batchsize, prefetch, prep_workers, prep_threads,
-                                 infer_threads, bitrate_margin, num_processes]))
+                                 infer_threads, bitrate_margin, num_processes, encoder]))
     _save_config(cfg)
     _write_running(cfg)   # 标记"有任务正在运行"（程序重启时会被清空）
 
     # 固定默认值（界面已隐藏这些选项）
     replacewith = "mosaic"
     preset = "ultrafast"
-    encoder = "libx264"
 
     input_path = clean_path(input_path)
     sfolder = clean_path(sfolder)
@@ -460,6 +460,7 @@ def load_state():
     return (g("input_folder"), g("sfolder"), g("output_path"), g("detector"),
             g("thresh"), g("scale"), g("batchsize"), g("prefetch"), g("prep_workers"),
             g("prep_threads"), g("infer_threads"), g("bitrate_margin"), g("num_processes"),
+            g("encoder"),
             pf, pv, pl)
 
 with gr.Blocks(title="人脸脱敏工具v2.0") as demo:
@@ -495,6 +496,9 @@ with gr.Blocks(title="人脸脱敏工具v2.0") as demo:
                     infer_threads = gr.Slider(1, 32, value=16, step=1, label="推理线程数 (infer-threads)")
                     bitrate_margin = gr.Slider(1.0, 2.0, value=1.10, step=0.05,
                                               label="码率余量 (bitrate-margin)")
+                    encoder = gr.Dropdown(["libx264", "h264_nvenc", "hevc_nvenc", "auto"],
+                                          value="libx264", label="编码器 (encoder)",
+                                          info="libx264=CPU编码;h264_nvenc/hevc_nvenc=显卡NVENC编码,CPU瓶颈时换它能让出CPU")
 
             run_btn = gr.Button("开始处理", variant="primary", size="lg")
             with gr.Row():
@@ -512,7 +516,7 @@ with gr.Blocks(title="人脸脱敏工具v2.0") as demo:
 
     # 所有输入组件（用于 demo.load 回填配置）
     _inputs = [input_folder, sfolder, output_path, detector, thresh, scale,
-               batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin, num_processes]
+               batchsize, prefetch, prep_workers, prep_threads, infer_threads, bitrate_margin, num_processes, encoder]
     _progress = [folder_progress, video_progress, output_log]
 
     # 定时器：每秒从全局状态拉取进度并刷新（与是谁的网页无关，断线/刷新后自动接回）
