@@ -157,7 +157,7 @@ def build_cmd(input_path, output_path, args, encoder, info, target_br=None):
 
     br = target_br if target_br is not None else args.bitrate
     bufsize = br * 2
-    cmd += ['-c:v', encoder, '-b:v', f'{br}k', '-threads', '0']
+    cmd += ['-c:v', encoder, '-pix_fmt', 'yuv420p', '-b:v', f'{br}k', '-threads', '0']
     cmd += ['-minrate', f'{br}k', '-maxrate', f'{br}k', '-bufsize', f'{bufsize}k']
     # 各编码器强制 CBR
     if encoder.endswith('_nvenc') or encoder.endswith('_amf'):
